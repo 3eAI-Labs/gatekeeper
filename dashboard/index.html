@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aria — Gateway Governance Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-deep: #08090c;
+  --bg-base: #0d0f14;
+  --bg-surface: #13161d;
+  --bg-elevated: #1a1d27;
+  --bg-hover: #1f2330;
+  --border: #23273340;
+  --border-active: #d4a54a30;
+  --text-primary: #e8e4dc;
+  --text-secondary: #8a8678;
+  --text-muted: #5a5750;
+  --text-dim: #3d3a35;
+  --amber: #d4a54a;
+  --amber-glow: #d4a54a20;
+  --amber-bright: #f0c868;
+  --green: #4ade80;
+  --green-dim: #4ade8020;
+  --red: #f87171;
+  --red-dim: #f8717120;
+  --blue: #60a5fa;
+  --blue-dim: #60a5fa20;
+  --orange: #fb923c;
+  --purple: #a78bfa;
+  --font-display: 'Instrument Serif', Georgia, serif;
+  --font-body: 'DM Sans', -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: var(--font-body); background: var(--bg-deep); color: var(--text-primary); min-height: 100vh; overflow-x: hidden; }
+body::before { content: ''; position: fixed; top: -50%; left: -50%; width: 200%; height: 200%; background: radial-gradient(ellipse at 30% 20%, #d4a54a06 0%, transparent 50%), radial-gradient(ellipse at 80% 80%, #60a5fa04 0%, transparent 40%); pointer-events: none; z-index: 0; }
+.app { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; position: relative; z-index: 1; }
+.sidebar { background: var(--bg-base); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: fixed; width: 260px; height: 100vh; overflow-y: auto; }
+.logo { padding: 28px 24px 20px; border-bottom: 1px solid var(--border); }
+.logo-mark { font-family: var(--font-display); font-size: 28px; color: var(--amber); letter-spacing: -0.5px; display: flex; align-items: center; gap: 10px; }
+.logo-mark .dot { width: 8px; height: 8px; background: var(--amber); border-radius: 50%; box-shadow: 0 0 12px var(--amber), 0 0 4px var(--amber); animation: pulse-glow 3s ease-in-out infinite; }
+@keyframes pulse-glow { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+.logo-sub { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 2px; margin-top: 4px; }
+.nav { padding: 16px 12px; flex: 1; }
+.nav-section { font-family: var(--font-mono); font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 2.5px; padding: 16px 12px 8px; }
+.nav-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: var(--radius); cursor: pointer; transition: all 0.2s; font-size: 13px; color: var(--text-secondary); position: relative; }
+.nav-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.nav-item.active { background: var(--amber-glow); color: var(--amber); font-weight: 500; }
+.nav-item.active::before { content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 3px; height: 20px; background: var(--amber); border-radius: 0 3px 3px 0; }
+.nav-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; font-size: 14px; opacity: 0.7; }
+.nav-item.active .nav-icon { opacity: 1; }
+.nav-badge { margin-left: auto; font-family: var(--font-mono); font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 500; }
+.badge-green { background: var(--green-dim); color: var(--green); }
+.badge-red { background: var(--red-dim); color: var(--red); }
+.badge-amber { background: var(--amber-glow); color: var(--amber); }
+.badge-blue { background: var(--blue-dim); color: var(--blue); }
+.sidebar-footer { padding: 16px; border-top: 1px solid var(--border); }
+.connection-status { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
+.main { margin-left: 260px; min-height: 100vh; }
+.page-header { padding: 28px 32px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; background: var(--bg-base); position: sticky; top: 0; z-index: 10; }
+.page-title { font-family: var(--font-display); font-size: 24px; color: var(--text-primary); }
+.page-title span { color: var(--text-muted); font-style: italic; }
+.header-actions { display: flex; gap: 10px; align-items: center; }
+.time-display { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); padding: 6px 12px; background: var(--bg-surface); border-radius: var(--radius); border: 1px solid var(--border); }
+.btn { font-family: var(--font-mono); font-size: 11px; padding: 8px 16px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg-surface); color: var(--text-secondary); cursor: pointer; transition: all 0.2s; text-transform: uppercase; letter-spacing: 1px; }
+.btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-active); }
+.btn-amber { background: var(--amber-glow); color: var(--amber); border-color: #d4a54a30; }
+.btn-amber:hover { background: #d4a54a20; }
+.page-content { padding: 24px 32px 48px; }
+.page { display: none; }
+.page.active { display: block; }
+.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+.stat-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 20px; position: relative; overflow: hidden; transition: border-color 0.3s; }
+.stat-card:hover { border-color: var(--border-active); }
+.stat-label { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 8px; }
+.stat-value { font-family: var(--font-mono); font-size: 28px; font-weight: 600; letter-spacing: -1px; margin-bottom: 4px; }
+.stat-value.amber { color: var(--amber); } .stat-value.green { color: var(--green); } .stat-value.red { color: var(--red); } .stat-value.blue { color: var(--blue); }
+.stat-delta { font-family: var(--font-mono); font-size: 11px; display: flex; align-items: center; gap: 4px; }
+.stat-delta.up { color: var(--green); } .stat-delta.down { color: var(--red); } .stat-delta.neutral { color: var(--text-muted); }
+.content-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+.panel { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+.panel-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.panel-title { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-secondary); }
+.panel-body { padding: 20px; }
+.chart-area { height: 160px; display: flex; align-items: flex-end; gap: 3px; padding: 0 4px; }
+.chart-bar { flex: 1; background: var(--amber-glow); border-radius: 2px 2px 0 0; transition: all 0.3s; position: relative; min-height: 4px; }
+.chart-bar:hover { background: #d4a54a40; }
+.chart-bar::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--amber); border-radius: 2px 2px 0 0; }
+.chart-bar.green { background: var(--green-dim); } .chart-bar.green::after { background: var(--green); }
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-dim); text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); font-weight: 500; }
+.data-table td { padding: 12px 16px; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-family: var(--font-mono); font-size: 12px; }
+.data-table tr:last-child td { border-bottom: none; }
+.data-table tr:hover td { background: var(--bg-hover); color: var(--text-primary); }
+.tag { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 4px; font-family: var(--font-mono); font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+.tag-green { background: var(--green-dim); color: var(--green); } .tag-red { background: var(--red-dim); color: var(--red); } .tag-amber { background: var(--amber-glow); color: var(--amber); } .tag-blue { background: var(--blue-dim); color: var(--blue); } .tag-purple { background: #a78bfa20; color: var(--purple); } .tag-muted { background: var(--bg-hover); color: var(--text-muted); }
+.canary-stages { display: flex; gap: 4px; margin: 12px 0; }
+.stage { flex: 1; text-align: center; padding: 8px 4px; border-radius: var(--radius); font-family: var(--font-mono); font-size: 11px; }
+.stage.completed { background: var(--green-dim); color: var(--green); }
+.stage.active { background: var(--amber-glow); color: var(--amber); border: 1px solid #d4a54a40; animation: stage-pulse 2s ease-in-out infinite; }
+@keyframes stage-pulse { 0%, 100% { border-color: #d4a54a40; } 50% { border-color: #d4a54a80; } }
+.stage.pending { background: var(--bg-elevated); color: var(--text-dim); }
+.canary-progress { display: flex; align-items: center; gap: 12px; margin: 16px 0; }
+.progress-track { flex: 1; height: 8px; background: var(--bg-elevated); border-radius: 4px; overflow: hidden; }
+.progress-fill { height: 100%; border-radius: 4px; transition: width 1s; background: linear-gradient(90deg, #d4a54a80, var(--amber-bright)); box-shadow: 0 0 12px var(--amber-glow); }
+.progress-pct { font-family: var(--font-mono); font-size: 14px; font-weight: 600; color: var(--amber); min-width: 40px; text-align: right; }
+.event-log { max-height: 320px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--bg-hover) transparent; }
+.event-item { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.event-item:last-child { border-bottom: none; }
+.event-time { font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); min-width: 55px; padding-top: 2px; }
+.event-dot { width: 6px; height: 6px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+.event-dot.green { background: var(--green); } .event-dot.red { background: var(--red); } .event-dot.amber { background: var(--amber); } .event-dot.blue { background: var(--blue); }
+.event-text { color: var(--text-secondary); line-height: 1.5; font-family: var(--font-mono); font-size: 11px; }
+.event-text strong { color: var(--text-primary); font-weight: 500; }
+.mask-preview { background: var(--bg-deep); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; font-family: var(--font-mono); font-size: 12px; line-height: 1.8; overflow-x: auto; }
+.mask-preview .key { color: var(--blue); } .mask-preview .string { color: var(--green); } .mask-preview .masked { color: var(--amber); background: var(--amber-glow); padding: 1px 4px; border-radius: 3px; } .mask-preview .redacted { color: var(--red); background: var(--red-dim); padding: 1px 4px; border-radius: 3px; }
+@keyframes fade-up { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+.animate-in { animation: fade-up 0.4s ease-out backwards; }
+.delay-1 { animation-delay: 0.05s; } .delay-2 { animation-delay: 0.1s; } .delay-3 { animation-delay: 0.15s; } .delay-4 { animation-delay: 0.2s; } .delay-5 { animation-delay: 0.25s; }
+@media (max-width: 1200px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } .content-grid { grid-template-columns: 1fr; } }
+@media (max-width: 768px) { .app { grid-template-columns: 1fr; } .sidebar { display: none; } .main { margin-left: 0; } .stats-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark"><span class="dot"></span> Aria</div>
+      <div class="logo-sub">Gateway Governance</div>
+    </div>
+    <nav class="nav">
+      <div class="nav-section">Modules</div>
+      <div class="nav-item active" data-page="shield"><span class="nav-icon">&#9737;</span>Shield<span class="nav-badge badge-green">OK</span></div>
+      <div class="nav-item" data-page="mask"><span class="nav-icon">&#9673;</span>Mask<span class="nav-badge badge-amber">3</span></div>
+      <div class="nav-item" data-page="canary"><span class="nav-icon">&#9651;</span>Canary<span class="nav-badge badge-blue">10%</span></div>
+      <div class="nav-section">Operations</div>
+      <div class="nav-item" data-page="audit"><span class="nav-icon">&#9783;</span>Audit Log</div>
+      <div class="nav-item" data-page="settings"><span class="nav-icon">&#9881;</span>Settings</div>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="connection-status"><span class="status-dot"></span><span>APISIX connected</span></div>
+      <div class="connection-status" style="margin-top:6px"><span class="status-dot"></span><span>Redis connected</span></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="page-header">
+      <h1 class="page-title" id="pageTitle">Shield <span>/ AI Governance</span></h1>
+      <div class="header-actions">
+        <div class="time-display" id="clock"></div>
+        <button class="btn" id="refreshBtn">Refresh</button>
+      </div>
+    </div>
+    <div class="page-content">
+
+      <!-- SHIELD -->
+      <div class="page active" id="page-shield">
+        <div class="stats-grid">
+          <div class="stat-card animate-in delay-1"><div class="stat-label">Tokens Today</div><div class="stat-value amber" id="shieldTokens">847,293</div><div class="stat-delta up">&#9650; 12% vs yesterday</div></div>
+          <div class="stat-card animate-in delay-2"><div class="stat-label">Cost This Month</div><div class="stat-value green">$342.18</div><div class="stat-delta neutral">68% of $500 budget</div></div>
+          <div class="stat-card animate-in delay-3"><div class="stat-label">Requests / min</div><div class="stat-value blue">127</div><div class="stat-delta up">&#9650; 8% vs avg</div></div>
+          <div class="stat-card animate-in delay-4"><div class="stat-label">Blocked Prompts</div><div class="stat-value red">14</div><div class="stat-delta down">3 injection, 11 PII</div></div>
+        </div>
+        <div class="content-grid">
+          <div class="panel animate-in delay-3">
+            <div class="panel-header"><span class="panel-title">Token Consumption (24h)</span><span class="tag tag-amber">gpt-4o</span></div>
+            <div class="panel-body"><div class="chart-area" id="tokenChart"></div></div>
+          </div>
+          <div class="panel animate-in delay-4">
+            <div class="panel-header"><span class="panel-title">Provider Status</span><span class="tag tag-green">3 active</span></div>
+            <div class="panel-body" style="padding:0">
+              <table class="data-table"><thead><tr><th>Provider</th><th>Circuit Breaker</th><th>Latency P95</th><th>Requests</th></tr></thead>
+              <tbody>
+                <tr><td style="color:var(--text-primary)">OpenAI</td><td><span class="tag tag-green">Closed</span></td><td>1.2s</td><td>45,892</td></tr>
+                <tr><td style="color:var(--text-primary)">Anthropic</td><td><span class="tag tag-green">Closed</span></td><td>1.8s</td><td>12,341</td></tr>
+                <tr><td style="color:var(--text-primary)">Google</td><td><span class="tag tag-green">Closed</span></td><td>0.9s</td><td>8,204</td></tr>
+                <tr><td style="color:var(--text-primary)">Azure OpenAI</td><td><span class="tag tag-muted">Disabled</span></td><td>-</td><td>-</td></tr>
+              </tbody></table>
+            </div>
+          </div>
+        </div>
+        <div class="panel animate-in delay-5">
+          <div class="panel-header"><span class="panel-title">Consumer Quotas</span><button class="btn btn-amber" style="font-size:10px;padding:5px 12px">+ Add Quota</button></div>
+          <div class="panel-body" style="padding:0">
+            <table class="data-table"><thead><tr><th>Consumer</th><th>Model</th><th>Used / Limit</th><th>Budget</th><th>Overage</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr><td style="color:var(--text-primary)">team-platform</td><td>gpt-4o</td><td>423K / 1M</td><td>$212 / $500</td><td><span class="tag tag-red">Block</span></td><td><span class="tag tag-green">42%</span></td></tr>
+              <tr><td style="color:var(--text-primary)">team-data</td><td>claude-sonnet</td><td>891K / 1M</td><td>$445 / $500</td><td><span class="tag tag-amber">Throttle</span></td><td><span class="tag tag-amber">89%</span></td></tr>
+              <tr><td style="color:var(--text-primary)">team-mobile</td><td>gpt-4o-mini</td><td>2.1M / 5M</td><td>$31 / $200</td><td><span class="tag tag-blue">Allow</span></td><td><span class="tag tag-green">15%</span></td></tr>
+              <tr><td style="color:var(--text-primary)">partner-xyz</td><td>gemini-flash</td><td>50K / 100K</td><td>$5 / $50</td><td><span class="tag tag-red">Block</span></td><td><span class="tag tag-green">50%</span></td></tr>
+            </tbody></table>
+          </div>
+        </div>
+      </div>
+
+      <!-- MASK -->
+      <div class="page" id="page-mask">
+        <div class="stats-grid">
+          <div class="stat-card animate-in delay-1"><div class="stat-label">Fields Masked Today</div><div class="stat-value green">12,847</div><div class="stat-delta up">&#9650; 5% vs yesterday</div></div>
+          <div class="stat-card animate-in delay-2"><div class="stat-label">PII Auto-Detected</div><div class="stat-value amber">342</div><div class="stat-delta down">Not covered by rules</div></div>
+          <div class="stat-card animate-in delay-3"><div class="stat-label">Active Rules</div><div class="stat-value blue">18</div><div class="stat-delta neutral">3 routes</div></div>
+          <div class="stat-card animate-in delay-4"><div class="stat-label">Roles Configured</div><div class="stat-value" style="color:var(--purple)">5</div><div class="stat-delta neutral">admin, operator, agent, partner, auditor</div></div>
+        </div>
+        <div class="content-grid">
+          <div class="panel animate-in delay-3">
+            <div class="panel-header"><span class="panel-title">Live Masking Preview</span><span class="tag tag-purple">support_agent</span></div>
+            <div class="panel-body"><div class="mask-preview" id="maskPreview"></div></div>
+          </div>
+          <div class="panel animate-in delay-4">
+            <div class="panel-header"><span class="panel-title">Active Masking Rules</span><button class="btn btn-amber" style="font-size:10px;padding:5px 12px">+ Add Rule</button></div>
+            <div class="panel-body" style="padding:0">
+              <table class="data-table"><thead><tr><th>Rule</th><th>JSONPath</th><th>Strategy</th><th>Hits</th></tr></thead>
+              <tbody>
+                <tr><td style="color:var(--text-primary)">rule-email</td><td>$..email</td><td><span class="tag tag-amber">mask:email</span></td><td>4,521</td></tr>
+                <tr><td style="color:var(--text-primary)">rule-pan</td><td>$.payment.card</td><td><span class="tag tag-amber">last4</span></td><td>2,103</td></tr>
+                <tr><td style="color:var(--text-primary)">rule-phone</td><td>$..phone</td><td><span class="tag tag-amber">mask:phone</span></td><td>3,890</td></tr>
+                <tr><td style="color:var(--text-primary)">rule-iban</td><td>$..iban</td><td><span class="tag tag-red">redact</span></td><td>1,245</td></tr>
+                <tr><td style="color:var(--text-primary)">rule-tc</td><td>$..tc_kimlik</td><td><span class="tag tag-amber">mask:national_id</span></td><td>1,088</td></tr>
+              </tbody></table>
+            </div>
+          </div>
+        </div>
+        <div class="panel animate-in delay-5">
+          <div class="panel-header"><span class="panel-title">Role Policy Matrix</span></div>
+          <div class="panel-body" style="padding:0">
+            <table class="data-table"><thead><tr><th>Role</th><th>PAN</th><th>Phone</th><th>Email</th><th>TC Kimlik</th><th>IBAN</th></tr></thead>
+            <tbody>
+              <tr><td style="color:var(--text-primary)">admin</td><td><span class="tag tag-green">Full</span></td><td><span class="tag tag-green">Full</span></td><td><span class="tag tag-green">Full</span></td><td><span class="tag tag-green">Full</span></td><td><span class="tag tag-green">Full</span></td></tr>
+              <tr><td style="color:var(--text-primary)">operator</td><td><span class="tag tag-amber">last4</span></td><td><span class="tag tag-amber">last4</span></td><td><span class="tag tag-green">Full</span></td><td><span class="tag tag-amber">last4</span></td><td><span class="tag tag-amber">last4</span></td></tr>
+              <tr><td style="color:var(--text-primary)">support_agent</td><td><span class="tag tag-amber">last4</span></td><td><span class="tag tag-amber">mask</span></td><td><span class="tag tag-amber">mask</span></td><td><span class="tag tag-amber">mask</span></td><td><span class="tag tag-amber">mask</span></td></tr>
+              <tr><td style="color:var(--text-primary)">external_partner</td><td><span class="tag tag-red">redact</span></td><td><span class="tag tag-red">redact</span></td><td><span class="tag tag-red">redact</span></td><td><span class="tag tag-red">redact</span></td><td><span class="tag tag-red">redact</span></td></tr>
+              <tr><td style="color:var(--text-primary)">auditor</td><td><span class="tag tag-purple">hash</span></td><td><span class="tag tag-purple">hash</span></td><td><span class="tag tag-purple">hash</span></td><td><span class="tag tag-purple">hash</span></td><td><span class="tag tag-purple">hash</span></td></tr>
+            </tbody></table>
+          </div>
+        </div>
+      </div>
+
+      <!-- CANARY -->
+      <div class="page" id="page-canary">
+        <div class="stats-grid">
+          <div class="stat-card animate-in delay-1"><div class="stat-label">Active Canaries</div><div class="stat-value blue">2</div><div class="stat-delta neutral">api-v2, auth-service</div></div>
+          <div class="stat-card animate-in delay-2"><div class="stat-label">Successful Deploys</div><div class="stat-value green">23</div><div class="stat-delta neutral">Last 30 days</div></div>
+          <div class="stat-card animate-in delay-3"><div class="stat-label">Auto-Rollbacks</div><div class="stat-value red">2</div><div class="stat-delta neutral">Last 30 days</div></div>
+          <div class="stat-card animate-in delay-4"><div class="stat-label">Avg Deploy Time</div><div class="stat-value amber">42m</div><div class="stat-delta down">&#9660; 8% faster</div></div>
+        </div>
+        <div class="panel animate-in delay-3" style="margin-bottom:16px">
+          <div class="panel-header">
+            <span class="panel-title">api-v2 - Progressive Deployment</span>
+            <div style="display:flex;gap:8px"><button class="btn">Pause</button><button class="btn btn-amber">Promote</button><button class="btn" style="color:var(--red);border-color:#f8717130">Rollback</button></div>
+          </div>
+          <div class="panel-body">
+            <div class="canary-stages">
+              <div class="stage completed">5%</div><div class="stage active">10%</div><div class="stage pending">25%</div><div class="stage pending">50%</div><div class="stage pending">100%</div>
+            </div>
+            <div class="canary-progress"><div class="progress-track"><div class="progress-fill" style="width:22%"></div></div><div class="progress-pct">10%</div></div>
+            <div style="display:flex;gap:32px;margin-top:16px">
+              <div><div class="stat-label">Canary Error Rate</div><div style="font-family:var(--font-mono);font-size:20px;color:var(--green);margin-top:4px">0.8%</div></div>
+              <div><div class="stat-label">Baseline Error Rate</div><div style="font-family:var(--font-mono);font-size:20px;color:var(--green);margin-top:4px">0.5%</div></div>
+              <div><div class="stat-label">Delta</div><div style="font-family:var(--font-mono);font-size:20px;color:var(--green);margin-top:4px">+0.3%</div></div>
+              <div><div class="stat-label">Threshold</div><div style="font-family:var(--font-mono);font-size:20px;color:var(--text-muted);margin-top:4px">2.0%</div></div>
+              <div><div class="stat-label">Hold Remaining</div><div style="font-family:var(--font-mono);font-size:20px;color:var(--amber);margin-top:4px" id="holdTimer">3m 22s</div></div>
+            </div>
+          </div>
+        </div>
+        <div class="content-grid">
+          <div class="panel animate-in delay-4">
+            <div class="panel-header"><span class="panel-title">Error Rate (Canary vs Baseline)</span></div>
+            <div class="panel-body"><div class="chart-area" id="canaryChart"></div></div>
+          </div>
+          <div class="panel animate-in delay-5">
+            <div class="panel-header"><span class="panel-title">Deployment Events</span></div>
+            <div class="panel-body">
+              <div class="event-log">
+                <div class="event-item"><span class="event-time">14:32</span><span class="event-dot green"></span><span class="event-text"><strong>api-v2</strong> advanced to stage 2 (10%)</span></div>
+                <div class="event-item"><span class="event-time">14:27</span><span class="event-dot green"></span><span class="event-text"><strong>api-v2</strong> stage 1 completed - delta 0.2% &lt; 2.0%</span></div>
+                <div class="event-item"><span class="event-time">14:22</span><span class="event-dot blue"></span><span class="event-text"><strong>api-v2</strong> canary started at 5%</span></div>
+                <div class="event-item"><span class="event-time">11:45</span><span class="event-dot green"></span><span class="event-text"><strong>auth-service</strong> promoted to 100%</span></div>
+                <div class="event-item"><span class="event-time">09:12</span><span class="event-dot red"></span><span class="event-text"><strong>payment-api</strong> auto-rolled back - delta 4.2% &gt; 2.0%</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AUDIT -->
+      <div class="page" id="page-audit">
+        <div class="panel animate-in delay-1">
+          <div class="panel-header"><span class="panel-title">Security Audit Log</span><button class="btn" style="font-size:10px;padding:5px 12px">Export CSV</button></div>
+          <div class="panel-body" style="padding:0">
+            <table class="data-table"><thead><tr><th>Timestamp</th><th>Consumer</th><th>Event</th><th>Action</th><th>Details</th></tr></thead>
+            <tbody>
+              <tr><td>14:30:12</td><td>team-data</td><td><span class="tag tag-red">PROMPT_BLOCKED</span></td><td>Blocked</td><td style="color:var(--text-muted)">Injection: "ignore previous instructions"</td></tr>
+              <tr><td>14:28:45</td><td>team-platform</td><td><span class="tag tag-amber">PII_DETECTED</span></td><td>Masked</td><td style="color:var(--text-muted)">Credit card in prompt - replaced with [REDACTED_PAN]</td></tr>
+              <tr><td>14:25:03</td><td>team-data</td><td><span class="tag tag-amber">QUOTA_EXCEEDED</span></td><td>Throttled</td><td style="color:var(--text-muted)">Monthly quota 89% - throttle policy</td></tr>
+              <tr><td>14:22:17</td><td>partner-xyz</td><td><span class="tag tag-green">MASK_APPLIED</span></td><td>Masked</td><td style="color:var(--text-muted)">8 fields: 3x email, 2x phone, 2x IBAN, 1x TC Kimlik</td></tr>
+              <tr><td>14:15:42</td><td>system</td><td><span class="tag tag-blue">PROVIDER_FAILOVER</span></td><td>Allowed</td><td style="color:var(--text-muted)">OpenAI 503 - failover to Anthropic</td></tr>
+              <tr><td>11:45:00</td><td>system</td><td><span class="tag tag-blue">CANARY_ROLLBACK</span></td><td>Rolled Back</td><td style="color:var(--text-muted)">payment-api: delta 4.2% &gt; 2.0%</td></tr>
+            </tbody></table>
+          </div>
+        </div>
+      </div>
+
+      <!-- SETTINGS -->
+      <div class="page" id="page-settings">
+        <div class="content-grid">
+          <div class="panel animate-in delay-1">
+            <div class="panel-header"><span class="panel-title">APISIX Connection</span></div>
+            <div class="panel-body">
+              <div style="display:grid;gap:16px">
+                <div><div class="stat-label" style="margin-bottom:6px">Admin API URL</div><input type="text" value="http://localhost:9180" style="width:100%;padding:8px 12px;background:var(--bg-deep);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);font-family:var(--font-mono);font-size:13px"></div>
+                <div><div class="stat-label" style="margin-bottom:6px">Admin API Key</div><input type="password" value="edd1c9f034335f136f87" style="width:100%;padding:8px 12px;background:var(--bg-deep);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);font-family:var(--font-mono);font-size:13px"></div>
+                <button class="btn btn-amber" style="width:fit-content">Test Connection</button>
+              </div>
+            </div>
+          </div>
+          <div class="panel animate-in delay-2">
+            <div class="panel-header"><span class="panel-title">Redis Connection</span></div>
+            <div class="panel-body">
+              <div style="display:grid;gap:16px">
+                <div><div class="stat-label" style="margin-bottom:6px">Redis URL</div><input type="text" value="redis://localhost:6379" style="width:100%;padding:8px 12px;background:var(--bg-deep);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);font-family:var(--font-mono);font-size:13px"></div>
+                <button class="btn btn-amber" style="width:fit-content">Test Connection</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script>
+// Navigation
+const titles = { shield:'Shield <span>/ AI Governance</span>', mask:'Mask <span>/ Data Privacy</span>', canary:'Canary <span>/ Progressive Delivery</span>', audit:'Audit <span>/ Security Log</span>', settings:'Settings <span>/ Configuration</span>' };
+document.querySelectorAll('.nav-item').forEach(function(item) {
+  item.addEventListener('click', function() {
+    var page = this.dataset.page;
+    document.querySelectorAll('.nav-item').forEach(function(n){n.classList.remove('active')});
+    this.classList.add('active');
+    document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active')});
+    document.getElementById('page-'+page).classList.add('active');
+    // Safe title update using known static strings only
+    var titleEl = document.getElementById('pageTitle');
+    if (titles[page]) { titleEl.textContent = ''; var parts = titles[page].split('<span>'); var main = document.createTextNode(parts[0]); titleEl.appendChild(main); if(parts[1]){var sp=document.createElement('span'); sp.textContent=parts[1].replace('</span>',''); titleEl.appendChild(sp);} }
+  });
+});
+
+// Clock
+function updateClock(){ var n=new Date(); document.getElementById('clock').textContent = String(n.getHours()).padStart(2,'0')+':'+String(n.getMinutes()).padStart(2,'0')+':'+String(n.getSeconds()).padStart(2,'0')+' UTC'; }
+setInterval(updateClock,1000); updateClock();
+
+// Charts - safe DOM creation
+function genChart(id, count, min, max, cls) {
+  var c = document.getElementById(id); if(!c) return;
+  while(c.firstChild) c.removeChild(c.firstChild);
+  for(var i=0;i<count;i++){var b=document.createElement('div');b.className='chart-bar'+(cls?' '+cls:'');b.style.height=(min+Math.random()*(max-min))+'%';c.appendChild(b);}
+}
+genChart('tokenChart',48,15,95);
+function genCanaryChart(){var c=document.getElementById('canaryChart');if(!c)return;while(c.firstChild)c.removeChild(c.firstChild);for(var i=0;i<30;i++){var b1=document.createElement('div');b1.className='chart-bar';b1.style.height=(3+Math.random()*8)+'%';b1.style.opacity='0.4';c.appendChild(b1);var b2=document.createElement('div');b2.className='chart-bar green';b2.style.height=(5+Math.random()*12)+'%';c.appendChild(b2);}}
+genCanaryChart();
+
+// Mask preview - safe DOM construction
+(function(){
+  var mp = document.getElementById('maskPreview'); if(!mp) return;
+  var lines = [
+    '{', '  "customer": {',
+    '    "name": "Ahmet Yilmaz",',
+    ['    "email": ', 'a***@y***.com', 'masked'],
+    ['    "phone": ', '+90532***4567', 'masked'],
+    ['    "tc_kimlik": ', '****56789**', 'masked'],
+    '  },', '  "payment": {',
+    ['    "card": ', '****-****-****-4242', 'masked'],
+    ['    "iban": ', '[REDACTED]', 'redacted'],
+    '    "amount": 1250.00',
+    '  }', '}'
+  ];
+  lines.forEach(function(line){
+    if(typeof line === 'string'){ var d=document.createElement('div'); d.style.cssText='padding-left:'+(line.match(/^\s*/)[0].length*8)+'px'; d.textContent=line; mp.appendChild(d); }
+    else { var d=document.createElement('div'); d.style.cssText='padding-left:32px';
+      var k=document.createTextNode(line[0]+'"'); d.appendChild(k);
+      var s=document.createElement('span'); s.className=line[2]; s.textContent=line[1]; d.appendChild(s);
+      var e=document.createTextNode('",'); d.appendChild(e); mp.appendChild(d); }
+  });
+})();
+
+// Hold timer
+var hold=202;
+setInterval(function(){if(hold<=0){document.getElementById('holdTimer').textContent='Advancing...';document.getElementById('holdTimer').style.color='var(--green)';return;}hold--;document.getElementById('holdTimer').textContent=Math.floor(hold/60)+'m '+String(hold%60).padStart(2,'0')+'s';},1000);
+
+// Live token counter
+var tc=847293;
+setInterval(function(){tc+=Math.floor(Math.random()*150)+20;document.getElementById('shieldTokens').textContent=tc.toLocaleString();},2000);
+
+// Refresh button
+document.getElementById('refreshBtn').addEventListener('click',function(){genChart('tokenChart',48,15,95);genCanaryChart();});
+</script>
+</body>
+</html>
