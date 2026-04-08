@@ -1,0 +1,40 @@
+# Java / Gradle
+aria-runtime/build/
+aria-runtime/.gradle/
+aria-runtime/bin/
+aria-runtime/out/
+*.class
+*.jar
+*.war
+
+# Lua
+*.luac
+
+# WASM
+wasm/aria-mask-engine/target/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Test output
+coverage/
+*.coverage
+htmlcov/
+
+# Generated protobuf
+aria-runtime/src/main/java/com/eai/aria/runtime/proto/

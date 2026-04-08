@@ -1,0 +1,30 @@
+syntax = "proto3";
+package aria.sidecar.v1;
+
+option java_multiple_files = true;
+option java_package = "com.eai.aria.runtime.proto.canary";
+option java_outer_classname = "CanaryProto";
+
+service CanaryService {
+  // Compare primary and shadow responses
+  rpc DiffResponses(DiffRequest) returns (DiffResponse);
+}
+
+message DiffRequest {
+  string request_id = 1;
+  string route_id = 2;
+  int32 primary_status = 3;
+  bytes primary_body = 4;
+  int64 primary_latency_ms = 5;
+  int32 shadow_status = 6;
+  bytes shadow_body = 7;
+  int64 shadow_latency_ms = 8;
+}
+
+message DiffResponse {
+  bool status_match = 1;
+  float body_similarity = 2;
+  int64 latency_delta_ms = 3;
+  repeated string diff_fields = 4;
+  string diff_summary = 5;
+}

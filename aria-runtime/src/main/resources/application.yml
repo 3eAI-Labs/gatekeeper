@@ -1,0 +1,43 @@
+server:
+  port: 8081
+
+aria:
+  uds-path: /var/run/aria/aria.sock
+  shutdown-grace-seconds: 30
+  redis:
+    host: ${ARIA_REDIS_HOST:127.0.0.1}
+    port: ${ARIA_REDIS_PORT:6379}
+    password: ${ARIA_REDIS_PASSWORD:}
+    database: ${ARIA_REDIS_DATABASE:0}
+    timeout-ms: 2000
+  postgres:
+    host: ${ARIA_POSTGRES_HOST:127.0.0.1}
+    port: ${ARIA_POSTGRES_PORT:5432}
+    database: ${ARIA_POSTGRES_DATABASE:aria}
+    username: ${ARIA_POSTGRES_USERNAME:aria}
+    password: ${ARIA_POSTGRES_PASSWORD:}
+
+spring:
+  application:
+    name: aria-runtime
+  main:
+    banner-mode: off
+  threads:
+    virtual:
+      enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    root: INFO
+    com.eai.aria: INFO
+  pattern:
+    console: '{"timestamp":"%d{ISO8601}","level":"%level","service":"aria-runtime","logger":"%logger{36}","message":"%msg"}%n'

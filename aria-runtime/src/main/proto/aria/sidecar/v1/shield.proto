@@ -1,0 +1,60 @@
+syntax = "proto3";
+package aria.sidecar.v1;
+
+option java_multiple_files = true;
+option java_package = "com.eai.aria.runtime.proto.shield";
+option java_outer_classname = "ShieldProto";
+
+service ShieldService {
+  // Analyze prompt for injection patterns using vector similarity
+  rpc AnalyzePrompt(PromptAnalysisRequest) returns (PromptAnalysisResponse);
+
+  // Count tokens using exact tiktoken tokenizer
+  rpc CountTokens(TokenCountRequest) returns (TokenCountResponse);
+
+  // Filter response content for harmful/toxic material
+  rpc FilterResponse(ContentFilterRequest) returns (ContentFilterResponse);
+}
+
+message PromptAnalysisRequest {
+  string request_id = 1;
+  string consumer_id = 2;
+  string content = 3;
+  string model = 4;
+  repeated string regex_matches = 5;
+}
+
+message PromptAnalysisResponse {
+  bool is_injection = 1;
+  float confidence_score = 2;
+  string pattern_category = 3;
+  string recommendation = 4;
+}
+
+message TokenCountRequest {
+  string request_id = 1;
+  string consumer_id = 2;
+  string model = 3;
+  string content = 4;
+  int32 lua_approximate_count = 5;
+}
+
+message TokenCountResponse {
+  int32 exact_token_count = 1;
+  int32 input_tokens = 2;
+  int32 output_tokens = 3;
+  int32 delta = 4;
+}
+
+message ContentFilterRequest {
+  string request_id = 1;
+  string content = 2;
+  string filter_level = 3;
+}
+
+message ContentFilterResponse {
+  bool is_harmful = 1;
+  string category = 2;
+  float confidence_score = 3;
+  string recommendation = 4;
+}

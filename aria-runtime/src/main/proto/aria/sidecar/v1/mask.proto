@@ -1,0 +1,29 @@
+syntax = "proto3";
+package aria.sidecar.v1;
+
+option java_multiple_files = true;
+option java_package = "com.eai.aria.runtime.proto.mask";
+option java_outer_classname = "MaskProto";
+
+service MaskService {
+  // Detect PII using Named Entity Recognition
+  rpc DetectPII(PiiDetectionRequest) returns (PiiDetectionResponse);
+}
+
+message PiiDetectionRequest {
+  string request_id = 1;
+  string content = 2;
+  repeated string already_masked_paths = 3;
+}
+
+message PiiDetectionResponse {
+  repeated PiiEntity entities = 1;
+}
+
+message PiiEntity {
+  string entity_type = 1;
+  int32 start_offset = 2;
+  int32 end_offset = 3;
+  float confidence = 4;
+  bool already_masked = 5;
+}
