@@ -1,0 +1,49 @@
+{
+  "dashboard": {
+    "title": "3e-Aria-Shield — AI Governance",
+    "uid": "aria-shield",
+    "version": 1,
+    "panels": [
+      {
+        "title": "Token Consumption",
+        "type": "timeseries",
+        "targets": [{ "expr": "sum(rate(aria_tokens_consumed[5m])) by (consumer, model)" }]
+      },
+      {
+        "title": "Cost ($/hour)",
+        "type": "stat",
+        "targets": [{ "expr": "sum(rate(aria_cost_dollars[1h]))" }]
+      },
+      {
+        "title": "Request Rate",
+        "type": "timeseries",
+        "targets": [{ "expr": "sum(rate(aria_requests_total[5m])) by (status)" }]
+      },
+      {
+        "title": "Latency P95",
+        "type": "timeseries",
+        "targets": [{ "expr": "histogram_quantile(0.95, rate(aria_request_latency_seconds_bucket[5m]))" }]
+      },
+      {
+        "title": "Circuit Breaker State",
+        "type": "stat",
+        "targets": [{ "expr": "aria_circuit_breaker_state" }]
+      },
+      {
+        "title": "Quota Utilization",
+        "type": "gauge",
+        "targets": [{ "expr": "aria_quota_utilization_pct" }]
+      },
+      {
+        "title": "Overage Requests",
+        "type": "timeseries",
+        "targets": [{ "expr": "sum(rate(aria_overage_requests[5m])) by (consumer, policy)" }]
+      },
+      {
+        "title": "Security Events",
+        "type": "timeseries",
+        "targets": [{ "expr": "sum(rate(aria_security_events_total[5m])) by (event_type)" }]
+      }
+    ]
+  }
+}

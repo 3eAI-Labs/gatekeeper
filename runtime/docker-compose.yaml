@@ -1,0 +1,77 @@
+version: "3.8"
+
+services:
+  # ── APISIX Gateway ──────────────────────────────────────────
+  apisix:
+    image: apache/apisix:3.8.0-debian
+    ports:
+      - "9080:9080"    # HTTP
+      - "9443:9443"    # HTTPS
+      - "9180:9180"    # Admin API
+      - "9091:9091"    # Prometheus metrics
+    volumes:
+      - ../apisix/plugins:/usr/local/apisix/apisix/plugins/aria:ro
+      - aria-uds:/var/run/aria
+      - ./apisix-config.yaml:/usr/local/apisix/conf/config.yaml:ro
+    depends_on:
+      - redis
+      - postgres
+      - aria-runtime
+
+  # ── Aria Runtime (Java Sidecar) ─────────────────────────────
+  aria-runtime:
+    image: ghcr.io/3eai-labs/aria-runtime:latest
+    ports:
+      - "8081:8081"    # Health checks
+    volumes:
+      - aria-uds:/var/run/aria
+    environment:
+      ARIA_REDIS_HOST: redis
+      ARIA_REDIS_PORT: 6379
+      ARIA_POSTGRES_HOST: postgres
+      ARIA_POSTGRES_PORT: 5432
+      ARIA_POSTGRES_DATABASE: aria
+      ARIA_POSTGRES_USERNAME: aria
+      ARIA_POSTGRES_PASSWORD: aria_password
+    depends_on:
+      - redis
+      - postgres
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── Redis ───────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+  # ── PostgreSQL ──────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: aria
+      POSTGRES_USER: aria
+      POSTGRES_PASSWORD: aria_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../db/migration:/docker-entrypoint-initdb.d:ro
+
+  # ── Grafana (optional) ─────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ../dashboards:/var/lib/grafana/dashboards:ro
+
+volumes:
+  aria-uds:
+  postgres-data:

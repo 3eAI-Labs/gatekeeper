@@ -199,3 +199,22 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+   =========================================================================
+
+   DUAL LICENSE NOTICE
+
+   This repository contains two types of software:
+
+   1. CORE SOFTWARE (Apache License 2.0)
+      All files OUTSIDE the "enterprise/" directory are licensed under
+      the Apache License, Version 2.0 (this file).
+      You may freely use, modify, and distribute the Core Software.
+
+   2. ENTERPRISE SOFTWARE (3EAI Labs Enterprise License)
+      All files INSIDE the "enterprise/" directory are proprietary and
+      licensed under the 3EAI Labs Enterprise License.
+      See enterprise/LICENSE for terms.
+
+   Copyright 2026 3EAI Labs Ltd.
+   =========================================================================

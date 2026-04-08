@@ -1,0 +1,40 @@
+{
+  "dashboard": {
+    "title": "3e-Aria-Canary — Progressive Delivery",
+    "uid": "aria-canary",
+    "version": 1,
+    "panels": [
+      {
+        "title": "Canary Traffic %",
+        "type": "gauge",
+        "targets": [{ "expr": "aria_canary_traffic_pct" }]
+      },
+      {
+        "title": "Error Rate: Canary vs Baseline",
+        "type": "timeseries",
+        "targets": [
+          { "expr": "aria_canary_error_rate{version='canary'}", "legendFormat": "Canary" },
+          { "expr": "aria_canary_error_rate{version='baseline'}", "legendFormat": "Baseline" }
+        ]
+      },
+      {
+        "title": "Latency P95: Canary vs Baseline",
+        "type": "timeseries",
+        "targets": [
+          { "expr": "aria_canary_latency_p95{version='canary'}", "legendFormat": "Canary P95" },
+          { "expr": "aria_canary_latency_p95{version='baseline'}", "legendFormat": "Baseline P95" }
+        ]
+      },
+      {
+        "title": "Rollback Events",
+        "type": "stat",
+        "targets": [{ "expr": "sum(aria_canary_rollback_total)" }]
+      },
+      {
+        "title": "Request Rate by Version",
+        "type": "timeseries",
+        "targets": [{ "expr": "sum(rate(aria_canary_requests_total[5m])) by (version)" }]
+      }
+    ]
+  }
+}
