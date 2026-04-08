@@ -1,0 +1,106 @@
+# 3e-Aria-Gatekeeper Helm Values
+# Override these in your environment-specific values files
+
+# ────────────────────────────────────────────────────────────────
+# Aria Runtime Sidecar
+# ────────────────────────────────────────────────────────────────
+runtime:
+  enabled: true
+  image:
+    repository: ghcr.io/3eai-labs/gatekeeper/aria-runtime
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "1000m"
+
+  udsPath: /var/run/aria/aria.sock
+  shutdownGraceSeconds: 30
+
+  healthcheck:
+    port: 8081
+    livenessPath: /healthz
+    readinessPath: /readyz
+    initialDelaySeconds: 10
+    periodSeconds: 10
+
+# ────────────────────────────────────────────────────────────────
+# Redis Configuration
+# ────────────────────────────────────────────────────────────────
+redis:
+  host: redis-cluster.default.svc.cluster.local
+  port: 6379
+  password: ""
+  database: 0
+  timeoutMs: 2000
+
+# ────────────────────────────────────────────────────────────────
+# PostgreSQL Configuration
+# ────────────────────────────────────────────────────────────────
+postgres:
+  host: postgres.default.svc.cluster.local
+  port: 5432
+  database: aria
+  username: aria
+  password: ""
+  # External secret reference (preferred over inline password)
+  existingSecret: ""
+  existingSecretKey: "password"
+
+# ────────────────────────────────────────────────────────────────
+# APISIX Plugin Configuration
+# ────────────────────────────────────────────────────────────────
+apisix:
+  # Path to copy Lua plugins into APISIX
+  pluginPath: /usr/local/apisix/apisix/plugins
+
+  # Plugins to enable in APISIX config
+  plugins:
+    - aria-shield
+    - aria-mask
+    - aria-canary
+
+# ────────────────────────────────────────────────────────────────
+# Grafana Dashboards
+# ────────────────────────────────────────────────────────────────
+dashboards:
+  enabled: true
+  # Grafana sidecar label for auto-discovery
+  label: grafana_dashboard
+  labelValue: "1"
+
+# ────────────────────────────────────────────────────────────────
+# Prometheus Alert Rules
+# ────────────────────────────────────────────────────────────────
+alerting:
+  enabled: true
+  rules:
+    allProvidersDown:
+      enabled: true
+      severity: critical
+      duration: 1m
+    sidecarDown:
+      enabled: true
+      severity: warning
+      duration: 5m
+    auditBufferOverflow:
+      enabled: true
+      severity: warning
+    canaryRollback:
+      enabled: true
+      severity: warning
+
+# ────────────────────────────────────────────────────────────────
+# Database Migrations
+# ────────────────────────────────────────────────────────────────
+migrations:
+  enabled: true
+  # Run as a Kubernetes Job before deployment
+  image:
+    repository: flyway/flyway
+    tag: "10-alpine"

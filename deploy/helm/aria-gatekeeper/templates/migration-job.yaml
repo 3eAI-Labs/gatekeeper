@@ -1,0 +1,62 @@
+{{- if .Values.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "aria-gatekeeper.fullname" . }}-migrate
+  labels:
+    app.kubernetes.io/name: aria-gatekeeper
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: migration
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: flyway
+          image: "{{ .Values.migrations.image.repository }}:{{ .Values.migrations.image.tag }}"
+          args:
+            - migrate
+          env:
+            - name: FLYWAY_URL
+              value: "jdbc:postgresql://{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.database }}"
+            - name: FLYWAY_USER
+              value: {{ .Values.postgres.username | quote }}
+            - name: FLYWAY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if .Values.postgres.existingSecret }}{{ .Values.postgres.existingSecret }}{{ else }}{{ include "aria-gatekeeper.fullname" . }}-secrets{{ end }}
+                  key: {{ .Values.postgres.existingSecretKey | default "postgres-password" }}
+            - name: FLYWAY_SCHEMAS
+              value: "aria"
+            - name: FLYWAY_DEFAULT_SCHEMA
+              value: "aria"
+          volumeMounts:
+            - name: migrations
+              mountPath: /flyway/sql
+      volumes:
+        - name: migrations
+          configMap:
+            name: {{ include "aria-gatekeeper.fullname" . }}-migrations
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aria-gatekeeper.fullname" . }}-migrations
+  labels:
+    app.kubernetes.io/name: aria-gatekeeper
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-2"
+    "helm.sh/hook-delete-policy": hook-succeeded
+data:
+  {{- range $path, $_ := .Files.Glob "migrations/*.sql" }}
+  {{ base $path }}: |
+    {{ $.Files.Get $path | nindent 4 }}
+  {{- end }}
+{{- end }}

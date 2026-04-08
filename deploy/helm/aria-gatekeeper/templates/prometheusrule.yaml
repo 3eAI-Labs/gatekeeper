@@ -1,0 +1,81 @@
+{{- if .Values.alerting.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "aria-gatekeeper.fullname" . }}-alerts
+  labels:
+    app.kubernetes.io/name: aria-gatekeeper
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: aria-gatekeeper.rules
+      rules:
+        {{- if .Values.alerting.rules.allProvidersDown.enabled }}
+        - alert: AriaAllProvidersDown
+          expr: min(aria_circuit_breaker_state) == 1
+          for: {{ .Values.alerting.rules.allProvidersDown.duration }}
+          labels:
+            severity: {{ .Values.alerting.rules.allProvidersDown.severity }}
+            team: platform
+          annotations:
+            summary: "All LLM providers are down"
+            description: "All configured LLM providers have open circuit breakers for over 1 minute."
+            runbook_url: "https://docs.3eai-labs.com/runbooks/all-providers-down"
+        {{- end }}
+
+        {{- if .Values.alerting.rules.sidecarDown.enabled }}
+        - alert: AriaSidecarUnavailable
+          expr: aria_sidecar_unavailable > 0
+          for: {{ .Values.alerting.rules.sidecarDown.duration }}
+          labels:
+            severity: {{ .Values.alerting.rules.sidecarDown.severity }}
+            team: platform
+          annotations:
+            summary: "Aria Runtime sidecar is unavailable"
+            description: "The Java sidecar has been unreachable for over 5 minutes. Features degraded to Lua-only mode."
+        {{- end }}
+
+        {{- if .Values.alerting.rules.auditBufferOverflow.enabled }}
+        - alert: AriaAuditBufferOverflow
+          expr: increase(aria_audit_buffer_overflow[5m]) > 0
+          labels:
+            severity: {{ .Values.alerting.rules.auditBufferOverflow.severity }}
+            team: platform
+          annotations:
+            summary: "Aria audit buffer is overflowing"
+            description: "Audit events are being dropped because the Redis buffer is full. Check PostgreSQL connectivity."
+        {{- end }}
+
+        {{- if .Values.alerting.rules.canaryRollback.enabled }}
+        - alert: AriaCanaryRollback
+          expr: increase(aria_canary_rollback_total[5m]) > 0
+          labels:
+            severity: {{ .Values.alerting.rules.canaryRollback.severity }}
+            team: platform
+          annotations:
+            summary: "Canary deployment auto-rolled back"
+            description: "A canary deployment was automatically rolled back due to error rate threshold breach."
+        {{- end }}
+
+        - alert: AriaHighQuotaUtilization
+          expr: aria_quota_utilization_pct > 90
+          for: 10m
+          labels:
+            severity: info
+            team: platform
+          annotations:
+            summary: "Consumer approaching quota limit"
+            description: "Consumer quota utilization is above 90%."
+
+        - alert: AriaHighErrorRate
+          expr: rate(aria_requests_total{status="5xx"}[5m]) / rate(aria_requests_total[5m]) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "High Shield error rate"
+            description: "LLM request error rate is above 5% for the last 5 minutes."
+{{- end }}

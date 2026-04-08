@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aria-gatekeeper.fullname" . }}-plugins
+  labels:
+    app.kubernetes.io/name: aria-gatekeeper
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  # Lua plugin files are mounted into APISIX's plugin directory
+  # Use an initContainer or sidecar to copy these into the APISIX container
+  aria-shield.lua: |
+    -- Mounted from ConfigMap. See apisix/plugins/aria-shield.lua
+    -- In production, use a shared volume or custom APISIX image with plugins baked in.
+
+  aria-mask.lua: |
+    -- Mounted from ConfigMap. See apisix/plugins/aria-mask.lua
+
+  aria-canary.lua: |
+    -- Mounted from ConfigMap. See apisix/plugins/aria-canary.lua

@@ -1,0 +1,95 @@
+{{- if .Values.runtime.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aria-gatekeeper.fullname" . }}-runtime
+  labels:
+    app.kubernetes.io/name: aria-runtime
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    app.kubernetes.io/component: sidecar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aria-runtime
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aria-runtime
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.runtime.healthcheck.port }}"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: aria-runtime
+          image: "{{ .Values.runtime.image.repository }}:{{ .Values.runtime.image.tag }}"
+          imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.runtime.healthcheck.port }}
+              protocol: TCP
+          env:
+            - name: ARIA_REDIS_HOST
+              value: {{ .Values.redis.host | quote }}
+            - name: ARIA_REDIS_PORT
+              value: {{ .Values.redis.port | quote }}
+            - name: ARIA_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aria-gatekeeper.fullname" . }}-secrets
+                  key: redis-password
+                  optional: true
+            - name: ARIA_REDIS_DATABASE
+              value: {{ .Values.redis.database | quote }}
+            - name: ARIA_POSTGRES_HOST
+              value: {{ .Values.postgres.host | quote }}
+            - name: ARIA_POSTGRES_PORT
+              value: {{ .Values.postgres.port | quote }}
+            - name: ARIA_POSTGRES_DATABASE
+              value: {{ .Values.postgres.database | quote }}
+            - name: ARIA_POSTGRES_USERNAME
+              value: {{ .Values.postgres.username | quote }}
+            - name: ARIA_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if .Values.postgres.existingSecret }}{{ .Values.postgres.existingSecret }}{{ else }}{{ include "aria-gatekeeper.fullname" . }}-secrets{{ end }}
+                  key: {{ .Values.postgres.existingSecretKey | default "postgres-password" }}
+                  optional: true
+          resources:
+            {{- toYaml .Values.runtime.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.runtime.healthcheck.livenessPath }}
+              port: health
+            initialDelaySeconds: {{ .Values.runtime.healthcheck.initialDelaySeconds }}
+            periodSeconds: {{ .Values.runtime.healthcheck.periodSeconds }}
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.runtime.healthcheck.readinessPath }}
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 1
+          volumeMounts:
+            - name: uds-socket
+              mountPath: /var/run/aria
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+      volumes:
+        - name: uds-socket
+          emptyDir: {}
+      terminationGracePeriodSeconds: {{ .Values.runtime.shutdownGraceSeconds }}
+{{- end }}

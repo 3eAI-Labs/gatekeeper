@@ -1,0 +1,18 @@
+apiVersion: v2
+name: aria-gatekeeper
+description: 3e-Aria-Gatekeeper — Modular governance suite for Apache APISIX
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+maintainers:
+  - name: Levent Sezgin Genc
+    email: lsg@3eai-labs.com
+home: https://github.com/3eai-labs/gatekeeper
+sources:
+  - https://github.com/3eai-labs/gatekeeper
+keywords:
+  - apisix
+  - ai-governance
+  - data-masking
+  - canary-deployment
+  - llm-routing
