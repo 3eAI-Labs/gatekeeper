@@ -10,8 +10,6 @@ jobs:
   lint:
     name: Lint and SAST
     runs-on: ubuntu-latest
-    env:
-      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,12 +18,22 @@ jobs:
       - name: Lua SAST scan
         run: bash tests/security/test_sast_lua.sh
 
-      - name: Secret detection (TruffleHog)
+      # TruffleHog: full-repo scan on push events (no base/head diff available),
+      # PR-diff scan on pull_request events.
+      - name: Secret detection (TruffleHog) — push
+        if: github.event_name == 'push'
         uses: trufflesecurity/trufflehog@main
         with:
           path: ./
-          base: ${{ env.DEFAULT_BRANCH }}
-          head: HEAD
+          extra_args: --only-verified
+
+      - name: Secret detection (TruffleHog) — PR
+        if: github.event_name == 'pull_request'
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
           extra_args: --only-verified
 
   test-lua:
