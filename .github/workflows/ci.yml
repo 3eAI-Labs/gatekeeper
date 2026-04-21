@@ -52,9 +52,14 @@ jobs:
           luarocks-5.1 install busted
           luarocks-5.1 install dkjson
       - name: Run tests
-        # Our Lua tests use the "test_*.lua" naming convention; busted defaults
-        # to "*_spec.lua", so pass an explicit pattern.
-        run: cd tests/lua && busted --verbose --pattern=^test_ .
+        # Tests use short require names (e.g. `require("aria-core")`) relative
+        # to the apisix/plugins/lib directory, so extend LUA_PATH accordingly.
+        # busted's default "*_spec.lua" pattern doesn't match our "test_*.lua"
+        # convention; override with --pattern.
+        run: |
+          cd tests/lua
+          export LUA_PATH="../../apisix/plugins/lib/?.lua;../../apisix/plugins/?.lua;;"
+          busted --verbose --pattern=^test_ .
 
   # NOTE: The Aria Runtime (Java sidecar) lives in the private
   # 3eai-labs/aria-runtime repository. Its build / test / container image
