@@ -46,9 +46,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install busted
         run: |
-          apk add --no-cache lua5.1-dev luarocks
-          luarocks install busted
-          luarocks install dkjson
+          # Alpine ships luarocks as version-suffixed binaries; pin to 5.1 to
+          # match the lua5.1-dev we install alongside it.
+          apk add --no-cache lua5.1-dev luarocks5.1 build-base
+          luarocks-5.1 install busted
+          luarocks-5.1 install dkjson
       - name: Run tests
         run: cd tests/lua && busted --verbose .
 
