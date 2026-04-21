@@ -570,11 +570,15 @@ The Aria Runtime is an optional Java 21 sidecar that provides advanced processin
 
 | Feature | Module | Without Sidecar | With Sidecar |
 |---------|--------|----------------|-------------|
-| Prompt analysis | Shield | Regex only | Regex + vector similarity |
-| Token counting | Shield | Approximate (word heuristic) | Exact (tiktoken) |
-| PII detection | Mask | Regex patterns | Regex + NER (Named Entity Recognition) |
-| Content filtering | Shield | Disabled | Active |
-| Shadow diff | Canary | Disabled | Active (structural comparison) |
+| Token counting | Shield | Approximate (word heuristic) | Exact (tiktoken) — community tier |
+| Prompt injection | Shield | Regex only | Regex + vector similarity — enterprise |
+| PII detection | Mask | Regex patterns | Regex + NER (Named Entity Recognition) — enterprise |
+| Content filtering | Shield | Disabled | Active — enterprise |
+| Shadow diff | Canary | Disabled | Active (structural comparison) — enterprise |
+
+> **Tier legend:** *community tier* features are part of the free Aria
+> Runtime distribution. *enterprise* features require an active 3EAI Labs
+> Enterprise License Agreement.
 
 ### 7.2 Deployment
 

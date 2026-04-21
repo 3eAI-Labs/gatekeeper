@@ -2,13 +2,18 @@
 
 Aria Runtime is the high-performance processing backend for 3e-Aria-Gatekeeper plugins. It provides capabilities that go beyond what Lua can efficiently handle:
 
-| Feature | Module | What It Does |
-|---------|--------|-------------|
-| **Prompt Analysis** | Shield | Vector-similarity injection detection beyond regex |
-| **Token Counting** | Shield | Exact tiktoken counting for billing accuracy |
-| **Content Filtering** | Shield | LLM response moderation |
-| **NER PII Detection** | Mask | Named Entity Recognition for PII beyond regex patterns |
-| **Shadow Diff Engine** | Canary | Structural comparison of primary vs. shadow responses |
+| Feature | Module | What It Does | Tier |
+|---------|--------|-------------|------|
+| **Token Counting** | Shield | Exact tiktoken counting for billing accuracy | Community |
+| **Prompt Analysis** | Shield | Vector-similarity injection detection beyond regex | Enterprise |
+| **Content Filtering** | Shield | LLM response moderation | Enterprise |
+| **NER PII Detection** | Mask | Named Entity Recognition for PII beyond regex patterns | Enterprise |
+| **Shadow Diff Engine** | Canary | Structural comparison of primary vs. shadow responses | Enterprise |
+
+*Community* features ship in the default runtime image and can be used
+without a commercial license. *Enterprise* features require an active
+3EAI Labs Enterprise License Agreement; they are packaged in the same
+image and activated at runtime when a valid license key is present.
 
 ## Architecture
 
@@ -35,13 +40,13 @@ Aria Runtime is the high-performance processing backend for 3e-Aria-Gatekeeper p
 
 The Lua plugins work **standalone without the sidecar**. When the runtime is unavailable, features degrade gracefully:
 
-| Feature | With Runtime | Without Runtime |
-|---------|-------------|-----------------|
-| Prompt injection detection | Regex + vector similarity | Regex only |
-| Token counting | Exact (tiktoken) | Approximate (word heuristic) |
-| PII detection | Regex + NER | Regex only |
-| Content filtering | Active | Disabled |
-| Shadow diff | Active | Disabled |
+| Feature | With Runtime | Without Runtime | Tier |
+|---------|-------------|-----------------|------|
+| Token counting | Exact (tiktoken) | Approximate (word heuristic) | Community |
+| Prompt injection detection | Regex + vector similarity | Regex only | Enterprise |
+| PII detection | Regex + NER | Regex only | Enterprise |
+| Content filtering | Active | Disabled | Enterprise |
+| Shadow diff | Active | Disabled | Enterprise |
 
 ## Getting Started
 
