@@ -52,7 +52,9 @@ jobs:
           luarocks-5.1 install busted
           luarocks-5.1 install dkjson
       - name: Run tests
-        run: cd tests/lua && busted --verbose .
+        # Our Lua tests use the "test_*.lua" naming convention; busted defaults
+        # to "*_spec.lua", so pass an explicit pattern.
+        run: cd tests/lua && busted --verbose --pattern=^test_ .
 
   # NOTE: The Aria Runtime (Java sidecar) lives in the private
   # 3eai-labs/aria-runtime repository. Its build / test / container image
