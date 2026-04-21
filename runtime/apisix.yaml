@@ -8,7 +8,7 @@
 #
 
 routes:
-  # Example: smoke-test route — echoes a JSON body without calling any upstream.
+  # Smoke-test route — echoes a JSON body without calling any upstream.
   - uri: /health/echo
     plugins:
       echo:
@@ -18,23 +18,23 @@ routes:
       nodes:
         "127.0.0.1:80": 1
 
-  # Example: LLM proxy protected by aria-shield (regex-only mode, no sidecar).
-  # Configure provider/quota/security per your needs.
-  #
-  # - uri: /v1/chat/completions
-  #   plugins:
-  #     aria-shield:
-  #       provider: openai
-  #       quota:
-  #         enabled: true
-  #         daily_tokens: 100000
-  #       prompt_security:
-  #         enabled: true
-  #         mode: regex_only
-  #   upstream:
-  #     scheme: https
-  #     type: roundrobin
-  #     nodes:
-  #       "api.openai.com:443": 1
+  # End-to-end LLM proxy using a local Ollama model (1B llama3.2 by default).
+  # Applications send OpenAI-compatible /v1/chat/completions payloads; aria-shield
+  # validates, enforces quota, handles failover, and forwards to Ollama.
+  - uri: /v1/chat/completions
+    plugins:
+      aria-shield:
+        provider: ollama
+        provider_config:
+          endpoint: "http://ollama:11434/v1/chat/completions"
+        quota:
+          enabled: false
+        prompt_security:
+          enabled: true
+          mode: regex_only
+    upstream:
+      type: roundrobin
+      nodes:
+        "ollama:11434": 1
 
 #END

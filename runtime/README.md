@@ -64,6 +64,35 @@ See [docker-compose.yaml](docker-compose.yaml) for the full configuration,
 [apisix-config.yaml](apisix-config.yaml) for the APISIX runtime config
 (standalone / YAML mode), and [apisix.yaml](apisix.yaml) for example routes.
 
+#### Add a local LLM for end-to-end testing
+
+The default `apisix.yaml` ships with a `/v1/chat/completions` route that
+forwards to an `ollama:11434` upstream. To bring up Ollama alongside the
+gateway, create a `compose.override.yaml` next to the base compose file:
+
+```yaml
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+volumes:
+  ollama-models:
+```
+
+Then pull a small model once and smoke-test the full path:
+
+```bash
+docker-compose up -d ollama
+docker-compose exec ollama ollama pull llama3.2:1b
+
+curl -sS -X POST http://localhost:9080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"llama3.2:1b","messages":[{"role":"user","content":"ping"}],"stream":false}'
+```
+
 ### Helm (Kubernetes)
 
 ```bash
