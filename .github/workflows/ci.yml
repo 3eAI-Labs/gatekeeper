@@ -11,7 +11,7 @@ jobs:
     name: Lint and SAST
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0   # TruffleHog needs full history for diff scans.
 
@@ -43,7 +43,7 @@ jobs:
     container:
       image: openresty/openresty:1.25.3.2-alpine
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install busted
         run: |
           # Alpine ships luarocks as version-suffixed binaries; pin to 5.1 to
