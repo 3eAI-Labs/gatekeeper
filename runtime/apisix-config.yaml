@@ -1,0 +1,51 @@
+#
+# APISIX configuration for 3e-Aria-Gatekeeper (standalone / YAML config mode).
+#
+# - No etcd required: routes/services/consumers are loaded from apisix.yaml.
+# - Aria Lua plugins are discovered via extra_lua_path from the volume mount
+#   defined in docker-compose.yaml (../apisix/plugins → /opt/aria-plugins).
+#
+# NOTE: This file is mounted WRITABLE by the container because the APISIX
+# docker entrypoint rewrites it on startup (sed migration from "traditional"
+# to "data_plane"). The content below is already in data_plane form, so the
+# rewrite is effectively a no-op.
+#
+
+apisix:
+  node_listen: 9080
+  extra_lua_path: "/opt/aria-plugins/?.lua"
+
+deployment:
+  role: data_plane
+  role_data_plane:
+    config_provider: yaml
+
+plugins:
+  # Subset of APISIX built-ins that Aria routes commonly use. Add more as
+  # your deployment requires — see https://apisix.apache.org/docs/apisix/plugins
+  - real-ip
+  - client-control
+  - proxy-control
+  - request-id
+  - cors
+  - ip-restriction
+  - jwt-auth
+  - key-auth
+  - consumer-restriction
+  - proxy-rewrite
+  - limit-count
+  - limit-req
+  - response-rewrite
+  - prometheus
+  - echo
+  - http-logger
+  - file-logger
+
+  # Aria plugins
+  - aria-shield
+  - aria-mask
+  - aria-canary
+
+plugin_attr:
+  prometheus:
+    export_uri: /apisix/prometheus/metrics

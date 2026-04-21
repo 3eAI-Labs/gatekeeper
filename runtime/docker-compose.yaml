@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # ── APISIX Gateway ──────────────────────────────────────────
   apisix:
@@ -9,10 +7,21 @@ services:
       - "9443:9443"    # HTTPS
       - "9180:9180"    # Admin API
       - "9091:9091"    # Prometheus metrics
+    environment:
+      # Tells the APISIX docker entrypoint to run in standalone (YAML) mode
+      # instead of requiring an etcd cluster.
+      APISIX_STAND_ALONE: "true"
     volumes:
-      - ../apisix/plugins:/usr/local/apisix/apisix/plugins/aria:ro
+      # Mount Aria Lua plugins under a custom path; apisix-config.yaml adds
+      # this path to apisix.extra_lua_path so require("apisix.plugins.aria-*")
+      # resolves here without shadowing APISIX's built-in plugins.
+      - ../apisix/plugins:/opt/aria-plugins/apisix/plugins:ro
       - aria-uds:/var/run/aria
-      - ./apisix-config.yaml:/usr/local/apisix/conf/config.yaml:ro
+      # config.yaml cannot be mounted :ro — the APISIX docker entrypoint runs
+      # sed+redirect over it on startup even when the content is already
+      # correct, which fails on a read-only mount.
+      - ./apisix-config.yaml:/usr/local/apisix/conf/config.yaml
+      - ./apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro
     depends_on:
       - redis
       - postgres

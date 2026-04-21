@@ -48,10 +48,16 @@ The Lua plugins work **standalone without the sidecar**. When the runtime is una
 ### Docker Compose (quickest)
 
 ```bash
+# One-time: APISIX's docker entrypoint rewrites config.yaml on startup, so
+# the host file must be writable by the apisix user inside the container.
+chmod 666 apisix-config.yaml
+
 docker-compose up -d
 ```
 
-See [docker-compose.yaml](docker-compose.yaml) for the full configuration.
+See [docker-compose.yaml](docker-compose.yaml) for the full configuration,
+[apisix-config.yaml](apisix-config.yaml) for the APISIX runtime config
+(standalone / YAML mode), and [apisix.yaml](apisix.yaml) for example routes.
 
 ### Helm (Kubernetes)
 

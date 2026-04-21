@@ -1,0 +1,40 @@
+#
+# APISIX routes for 3e-Aria-Gatekeeper (standalone / YAML config mode).
+#
+# Replace the example routes below with your own. APISIX 3.x requires the
+# "#END" marker at the bottom of this file.
+#
+# Reference: https://apisix.apache.org/docs/apisix/deployment-modes/#standalone
+#
+
+routes:
+  # Example: smoke-test route — echoes a JSON body without calling any upstream.
+  - uri: /health/echo
+    plugins:
+      echo:
+        body: '{"ok":true,"gateway":"3e-aria-gatekeeper"}'
+    upstream:
+      type: roundrobin
+      nodes:
+        "127.0.0.1:80": 1
+
+  # Example: LLM proxy protected by aria-shield (regex-only mode, no sidecar).
+  # Configure provider/quota/security per your needs.
+  #
+  # - uri: /v1/chat/completions
+  #   plugins:
+  #     aria-shield:
+  #       provider: openai
+  #       quota:
+  #         enabled: true
+  #         daily_tokens: 100000
+  #       prompt_security:
+  #         enabled: true
+  #         mode: regex_only
+  #   upstream:
+  #     scheme: https
+  #     type: roundrobin
+  #     nodes:
+  #       "api.openai.com:443": 1
+
+#END

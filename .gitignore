@@ -31,6 +31,12 @@ Thumbs.db
 *.pem
 *.key
 
+# Docker Compose local overrides (developer-specific port maps, etc.)
+compose.override.yaml
+compose.override.yml
+docker-compose.override.yaml
+docker-compose.override.yml
+
 # Test output
 coverage/
 *.coverage
