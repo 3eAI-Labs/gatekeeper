@@ -68,7 +68,10 @@ local function simple_decode(s)
     json_str = json_str:gsub(":null", "=nil")
     json_str = json_str:gsub(":true", "=true")
     json_str = json_str:gsub(":false", "=false")
-    local fn, err = load("return " .. json_str)
+    -- `load(string)` exists in Lua 5.2+ and LuaJIT 5.2-compat mode;
+    -- Lua 5.1 (what Alpine luarocks5.1 runs) requires loadstring.
+    local compile = loadstring or load
+    local fn = compile("return " .. json_str)
     if fn then
         local ok, result = pcall(fn)
         if ok then return result end
