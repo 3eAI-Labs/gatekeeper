@@ -5,10 +5,10 @@ Aria Runtime is the high-performance processing backend for 3e-Aria-Gatekeeper p
 | Feature | Module | What It Does | Tier |
 |---------|--------|-------------|------|
 | **Token Counting** | Shield | Exact tiktoken counting for billing accuracy | Community |
+| **Shadow Diff Engine** | Canary | Structural comparison of primary vs. shadow responses | Community |
 | **Prompt Analysis** | Shield | Vector-similarity injection detection beyond regex | Enterprise |
 | **Content Filtering** | Shield | LLM response moderation | Enterprise |
 | **NER PII Detection** | Mask | Named Entity Recognition for PII beyond regex patterns | Enterprise |
-| **Shadow Diff Engine** | Canary | Structural comparison of primary vs. shadow responses | Enterprise |
 
 *Community* features ship in the default runtime image and can be used
 without a commercial license. *Enterprise* features require an active
@@ -43,10 +43,10 @@ The Lua plugins work **standalone without the sidecar**. When the runtime is una
 | Feature | With Runtime | Without Runtime | Tier |
 |---------|-------------|-----------------|------|
 | Token counting | Exact (tiktoken) | Approximate (word heuristic) | Community |
+| Shadow diff | Active | Disabled | Community |
 | Prompt injection detection | Regex + vector similarity | Regex only | Enterprise |
 | PII detection | Regex + NER | Regex only | Enterprise |
 | Content filtering | Active | Disabled | Enterprise |
-| Shadow diff | Active | Disabled | Enterprise |
 
 ## Getting Started
 
