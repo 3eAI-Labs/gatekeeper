@@ -165,7 +165,10 @@ describe("aria-pii", function()
             end)
 
             it("should strip non-digit characters", function()
-                assert.is_false(pii.validators.tc_kimlik_check("100-000-001-46"))
+                -- "abc-123-def" strips to "123" (3 digits) — fails length check.
+                -- Earlier "100-000-001-46" happened to form the *valid* TC Kimlik
+                -- 10000000146, so the assertion was flipped for the wrong reason.
+                assert.is_false(pii.validators.tc_kimlik_check("abc-123-def"))
             end)
 
             it("should handle empty string", function()
