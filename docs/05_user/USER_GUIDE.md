@@ -536,7 +536,7 @@ curl -X POST http://localhost:9080/aria/canary/route-3/resume
 
 ### 6.6 Traffic Shadowing
 
-Copy a percentage of live traffic to a "shadow" upstream without affecting the client response. The shadow response is compared with the primary by the diff engine (requires Aria Runtime sidecar).
+Copy a percentage of live traffic to a "shadow" upstream without affecting the client response. The shadow response is compared with the primary: HTTP status, body length, and latency delta in the Lua plugin (no sidecar required); structural body diff lands with the Aria Runtime sidecar.
 
 ```json
 {
@@ -571,7 +571,7 @@ The Aria Runtime is an optional Java 21 sidecar that provides advanced processin
 | Feature | Module | Without Sidecar | With Sidecar |
 |---------|--------|----------------|-------------|
 | Token counting | Shield | Approximate (word heuristic) | Exact (tiktoken) — community tier |
-| Shadow diff | Canary | Disabled | Active (structural comparison) — community tier |
+| Shadow diff | Canary | Basic (status + body length + latency) | Active (structural comparison) — community tier |
 | Prompt injection | Shield | Regex only | Regex + vector similarity — enterprise |
 | PII detection | Mask | Regex patterns | Regex + NER (Named Entity Recognition) — enterprise |
 | Content filtering | Shield | Disabled | Active — enterprise |

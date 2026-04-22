@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+#### Module C: 3e-Aria-Canary
+- **Traffic shadowing — basic diff (Iter 1)** — Fire-and-forget duplication of a configurable percentage of live traffic to a shadow upstream, with Lua-side basic diff (HTTP status, body length, latency delta) and Prometheus metrics. Sidecar-based structural diff lands in Iter 2 (US-C06, US-C07, BR-CN-006).
+  - New schema block: `shadow.{enabled, traffic_pct, shadow_upstream.nodes, timeout_ms, failure_threshold, disable_window_seconds}`.
+  - Auto-disable after configurable consecutive failures (default 3) with sliding-window counter; auto-recover after `disable_window_seconds` (default 300s).
+  - Shadow requests carry `X-Aria-Shadow: true` header; the plugin refuses to shadow a request that already has the flag, preventing recursion.
+  - New metrics: `aria_shadow_requests_total`, `aria_shadow_diff_count{type=status|body_length}`, `aria_shadow_latency_delta_ms` (histogram), `aria_shadow_upstream_failures`, `aria_shadow_upstream_down`.
+  - Unit tests: `tests/lua/test_canary_shadow.lua` (schema validation, sampling, weighted node selection, basic diff, failure threshold, log-phase scheduling).
+
 ## [0.1.0] - 2026-04-08
 
 ### Added

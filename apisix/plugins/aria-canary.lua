@@ -63,6 +63,26 @@ local schema = {
         retry_cooldown  = { type = "string", default = "10m" },
         max_retries     = { type = "integer", minimum = 0, maximum = 10, default = 3 },
         consistent_hash = { type = "boolean", default = true },
+        -- Traffic shadowing (BR-CN-006). Iter 1: Lua-only basic diff.
+        shadow = {
+            type = "object",
+            properties = {
+                enabled           = { type = "boolean", default = false },
+                traffic_pct       = { type = "integer", minimum = 1, maximum = 100, default = 10 },
+                shadow_upstream   = {
+                    type = "object",
+                    properties = {
+                        nodes  = { type = "object" },  -- { "host:port" = weight, ... }
+                        scheme = { type = "string", enum = {"http", "https"}, default = "http" },
+                    },
+                    required = {"nodes"},
+                },
+                timeout_ms        = { type = "integer", minimum = 100, maximum = 30000, default = 2000 },
+                failure_threshold = { type = "integer", minimum = 1, maximum = 100, default = 3 },
+                disable_window_seconds = { type = "integer", minimum = 30, maximum = 3600, default = 300 },
+            },
+            default = { enabled = false },
+        },
         notifications = {
             type = "object",
             properties = {
@@ -102,6 +122,14 @@ function _M.check_schema(conf)
         end
     end
 
+    -- Shadow requires shadow_upstream.nodes when enabled (BR-CN-006)
+    if conf.shadow and conf.shadow.enabled then
+        local up = conf.shadow.shadow_upstream
+        if not up or not up.nodes or next(up.nodes) == nil then
+            return false, "shadow.shadow_upstream.nodes is required when shadow.enabled = true"
+        end
+    end
+
     return true
 end
 
@@ -128,6 +156,14 @@ end
 
 local function lock_key(route_id)
     return "aria:canary:lock:" .. route_id
+end
+
+local function shadow_failures_key(route_id)
+    return "aria:canary:shadow:fails:" .. route_id
+end
+
+local function shadow_disabled_key(route_id)
+    return "aria:canary:shadow:disabled:" .. route_id
 end
 
 
@@ -195,6 +231,12 @@ end
 function _M.access(conf, ctx)
     local route_id = ctx.var.route_id or "default"
     ctx.aria_request_start = ngx.now()
+
+    -- Shadow sampling + payload capture (BR-CN-006). Independent of canary state.
+    -- Captured here because ngx.req.* is unavailable in timer ctx (log phase fires the call).
+    if should_shadow(conf, ctx, route_id) then
+        ctx.aria_shadow_payload = capture_shadow_payload(conf, ctx)
+    end
 
     -- Read canary state
     local state = read_state(conf, route_id)
@@ -268,12 +310,27 @@ end
 -- ────────────────────────────────────────────────────────────────────────────
 
 function _M.log(conf, ctx)
-    local version = ctx.aria_canary_version
-    if not version then return end
-
     local route_id = ctx.var.route_id or "default"
     local status = ngx.status
     local latency = ngx.now() - (ctx.aria_request_start or ngx.now())
+
+    -- Shadow fire-and-forget (BR-CN-006). Independent of canary state.
+    -- Scheduled here so primary response stats (status/bytes/latency) are final.
+    if ctx.aria_shadow_payload then
+        local primary = {
+            status     = status,
+            bytes_sent = tonumber(ctx.var.bytes_sent) or 0,
+            latency_ms = latency * 1000,
+        }
+        local ok, terr = ngx.timer.at(0, fire_shadow, conf, route_id, ctx.aria_shadow_payload, primary)
+        if not ok then
+            aria_core.log_error("shadow_timer_failed",
+                str_fmt("Failed to schedule shadow for route %s: %s", route_id, terr or "unknown"))
+        end
+    end
+
+    local version = ctx.aria_canary_version
+    if not version then return end
 
     -- Determine window ID (10-second windows for error rate calculation)
     local window_seconds = conf.error_monitor and conf.error_monitor.window_seconds or 60
@@ -594,6 +651,169 @@ function calculate_error_rate(conf, route_id, version, current_window_id)
 
     if total_requests == 0 then return 0, 0 end
     return total_errors / total_requests, total_requests
+end
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- Traffic Shadowing (BR-CN-006) — Iter 1: Lua-only basic diff
+-- Sidecar-based structural diff lands in Iter 2 (US-C07).
+-- ────────────────────────────────────────────────────────────────────────────
+
+--- Pick a shadow node via weighted random selection.
+-- @param upstream { nodes = { "host:port" = weight, ... }, scheme = "http"|"https" }
+-- @return host:port string or nil
+function pick_shadow_node(upstream)
+    if not upstream or not upstream.nodes then return nil end
+
+    local total_weight = 0
+    for _, w in pairs(upstream.nodes) do total_weight = total_weight + w end
+    if total_weight <= 0 then return nil end
+
+    local pick = math.random(total_weight)
+    local cursor = 0
+    for node, w in pairs(upstream.nodes) do
+        cursor = cursor + w
+        if pick <= cursor then return node end
+    end
+    return nil
+end
+
+--- Check Redis-backed auto-disable flag (set after failure_threshold breaches).
+function is_shadow_disabled(conf, route_id)
+    local v = aria_core.redis_do(conf, function(red)
+        return red:get(shadow_disabled_key(route_id))
+    end)
+    return v and v ~= ngx.null and tostring(v) == "1"
+end
+
+--- Increment failure counter; if threshold breached, auto-disable + emit metric.
+function record_shadow_failure(conf, route_id, err)
+    aria_core.counter_inc("aria_shadow_upstream_failures", 1, { route = route_id })
+
+    local fk = shadow_failures_key(route_id)
+    local count = aria_core.redis_do(conf, function(red)
+        local n = red:incr(fk)
+        red:expire(fk, 300)  -- 5 min sliding window
+        return n
+    end)
+
+    local threshold = (conf.shadow and conf.shadow.failure_threshold) or 3
+    if count and tonumber(count) >= threshold then
+        local window = (conf.shadow and conf.shadow.disable_window_seconds) or 300
+        aria_core.redis_do(conf, function(red)
+            red:set(shadow_disabled_key(route_id), "1", "EX", window)
+            red:del(fk)
+            return true
+        end)
+        aria_core.counter_inc("aria_shadow_upstream_down", 1, { route = route_id })
+        aria_core.log_warn("shadow_auto_disabled",
+            str_fmt("Shadow auto-disabled for route %s after %d failures: %s",
+                route_id, count, err or "unknown"))
+    end
+end
+
+--- Reset failure counter on successful shadow request.
+local function reset_shadow_failures(conf, route_id)
+    aria_core.redis_do(conf, function(red)
+        return red:del(shadow_failures_key(route_id))
+    end)
+end
+
+--- Sampling decision (BR-CN-006 madde 1). Independent of canary state.
+function should_shadow(conf, ctx, route_id)
+    if not conf.shadow or not conf.shadow.enabled then return false end
+    if ctx.var.http_x_aria_shadow == "true" then return false end  -- never shadow a shadow
+    if is_shadow_disabled(conf, route_id) then return false end
+    return math.random(100) <= (conf.shadow.traffic_pct or 10)
+end
+
+--- Capture request data in access phase so log phase can replay it.
+-- Reading body here is required because ngx.req.* is not available in timer ctx.
+function capture_shadow_payload(conf, ctx)
+    ngx.req.read_body()
+    local headers = ngx.req.get_headers(50) or {}
+    headers["X-Aria-Shadow"] = "true"  -- BR-CN-006 madde 5: shadow upstream can opt-out side effects
+    return {
+        uri     = ctx.var.request_uri or "/",
+        method  = ngx.req.get_method(),
+        body    = ngx.req.get_body_data(),
+        headers = headers,
+    }
+end
+
+--- Compute basic diff: status, body length, latency.
+-- Returns { status_match, body_length_delta, latency_delta_ms, has_diff, diff_type }
+function compute_basic_diff(primary, shadow)
+    local status_match = (primary.status == shadow.status)
+    local primary_len = primary.bytes_sent or 0
+    local shadow_len = #(shadow.body or "")
+    local body_length_delta = math.abs(shadow_len - primary_len)
+    local latency_delta_ms = math_floor(shadow.latency_ms - primary.latency_ms)
+
+    local diff_type = nil
+    if not status_match then
+        diff_type = "status"
+    elseif body_length_delta > 0 then
+        diff_type = "body_length"
+    end
+
+    return {
+        status_match      = status_match,
+        body_length_delta = body_length_delta,
+        latency_delta_ms  = latency_delta_ms,
+        has_diff          = (diff_type ~= nil),
+        diff_type         = diff_type,
+    }
+end
+
+--- ngx.timer callback: fire shadow request, record metrics, update failure state.
+function fire_shadow(premature, conf, route_id, payload, primary)
+    if premature then return end
+
+    aria_core.counter_inc("aria_shadow_requests_total", 1, { route = route_id })
+
+    local node = pick_shadow_node(conf.shadow.shadow_upstream)
+    if not node then
+        record_shadow_failure(conf, route_id, "no_node")
+        return
+    end
+
+    local scheme = (conf.shadow.shadow_upstream.scheme) or "http"
+    local url = scheme .. "://" .. node .. payload.uri
+
+    local httpc = require("resty.http").new()
+    httpc:set_timeout(conf.shadow.timeout_ms or 2000)
+
+    local shadow_start = ngx.now()
+    local res, err = httpc:request_uri(url, {
+        method  = payload.method,
+        body    = payload.body,
+        headers = payload.headers,
+    })
+    local shadow_latency_ms = (ngx.now() - shadow_start) * 1000
+
+    if not res then
+        record_shadow_failure(conf, route_id, err)
+        return
+    end
+
+    reset_shadow_failures(conf, route_id)
+
+    local diff = compute_basic_diff(primary, {
+        status     = res.status,
+        body       = res.body,
+        latency_ms = shadow_latency_ms,
+    })
+
+    aria_core.histogram_observe("aria_shadow_latency_delta_ms",
+        diff.latency_delta_ms, { route = route_id })
+
+    if diff.has_diff then
+        aria_core.counter_inc("aria_shadow_diff_count", 1, {
+            route = route_id,
+            type  = diff.diff_type,
+        })
+    end
 end
 
 

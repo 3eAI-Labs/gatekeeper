@@ -43,7 +43,7 @@ The Lua plugins work **standalone without the sidecar**. When the runtime is una
 | Feature | With Runtime | Without Runtime | Tier |
 |---------|-------------|-----------------|------|
 | Token counting | Exact (tiktoken) | Approximate (word heuristic) | Community |
-| Shadow diff | Active | Disabled | Community |
+| Shadow diff | Active | Basic (status + body length + latency) | Community |
 | Prompt injection detection | Regex + vector similarity | Regex only | Enterprise |
 | PII detection | Regex + NER | Regex only | Enterprise |
 | Content filtering | Active | Disabled | Enterprise |
