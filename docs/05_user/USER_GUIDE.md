@@ -544,11 +544,29 @@ Copy a percentage of live traffic to a "shadow" upstream without affecting the c
     "shadow": {
       "enabled": true,
       "traffic_pct": 10,
-      "shadow_upstream": { "nodes": {"orders-next:8080": 1} }
+      "shadow_upstream": {
+        "scheme": "http",
+        "nodes": { "orders-next:8080": 1 }
+      },
+      "timeout_ms": 2000,
+      "failure_threshold": 3,
+      "disable_window_seconds": 300
     }
   }
 }
 ```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Master switch. When false, the entire block is a no-op. |
+| `traffic_pct` | int 1–100 | `10` | Percentage of live traffic duplicated to the shadow upstream. |
+| `shadow_upstream.nodes` | object | **required** | `{"host:port": weight}` map. Weights are used for weighted random selection. |
+| `shadow_upstream.scheme` | `http`\|`https` | `http` | Scheme for outbound shadow requests. |
+| `timeout_ms` | int 100–30000 | `2000` | Per-request timeout for the shadow call. Primary is never affected by shadow slowness. |
+| `failure_threshold` | int 1–100 | `3` | Consecutive failures (timeout / connect-refused / no node) before auto-disable kicks in (BR-CN-006). |
+| `disable_window_seconds` | int 30–3600 | `300` | How long shadow stays auto-disabled after the threshold breaches; re-enables automatically on expiry. |
+
+Shadow requests carry an `X-Aria-Shadow: true` header so the shadow upstream can opt out of side effects (writes, notifications, external API calls). The plugin also refuses to shadow any request that already has this header, preventing recursion in chained-gateway setups.
 
 ### 6.7 Prometheus Metrics
 
@@ -558,7 +576,11 @@ Copy a percentage of live traffic to a "shadow" upstream without affecting the c
 | `aria_canary_error_rate` | Gauge | route, version | Error rate per version |
 | `aria_canary_latency_p95` | Gauge | route, version | P95 latency per version |
 | `aria_canary_rollback_total` | Counter | route | Total rollback events |
-| `aria_shadow_diff_count` | Counter | route | Response differences detected |
+| `aria_shadow_requests_total` | Counter | route | Shadow requests fired |
+| `aria_shadow_diff_count` | Counter | route, type | Response differences detected (`type` = `status`\|`body_length`) |
+| `aria_shadow_latency_delta_ms` | Histogram | route | Shadow-minus-primary latency distribution (ms) |
+| `aria_shadow_upstream_failures` | Counter | route | Shadow upstream failures (timeout / refused) |
+| `aria_shadow_upstream_down` | Counter | route | Auto-disable events (failure threshold breached) |
 
 ---
 
