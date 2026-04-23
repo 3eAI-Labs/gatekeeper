@@ -536,7 +536,15 @@ curl -X POST http://localhost:9080/aria/canary/route-3/resume
 
 ### 6.6 Traffic Shadowing
 
-Copy a percentage of live traffic to a "shadow" upstream without affecting the client response. The shadow response is compared with the primary: HTTP status, body length, and latency delta in the Lua plugin (no sidecar required); structural body diff lands with the Aria Runtime sidecar.
+Copy a percentage of live traffic to a "shadow" upstream without affecting the
+client response. Two diff tiers are available, both community:
+
+- **Basic diff (Lua-only, no sidecar):** HTTP status, body length, and latency delta.
+- **Structural diff (via Aria Runtime sidecar):** JSON-aware field-level comparison
+  with Sørensen-Dice similarity, returned via an HTTP bridge to the sidecar's
+  `/v1/diff` endpoint. Opt-in per route via `shadow.sidecar.enabled`. If the
+  sidecar is unreachable for a given request, the plugin falls back to basic
+  diff automatically — primary traffic is never affected.
 
 ```json
 {
@@ -550,7 +558,13 @@ Copy a percentage of live traffic to a "shadow" upstream without affecting the c
       },
       "timeout_ms": 2000,
       "failure_threshold": 3,
-      "disable_window_seconds": 300
+      "disable_window_seconds": 300,
+      "sidecar": {
+        "enabled": true,
+        "endpoint": "http://127.0.0.1:8081",
+        "timeout_ms": 500,
+        "max_body_bytes": 1048576
+      }
     }
   }
 }
@@ -565,8 +579,19 @@ Copy a percentage of live traffic to a "shadow" upstream without affecting the c
 | `timeout_ms` | int 100–30000 | `2000` | Per-request timeout for the shadow call. Primary is never affected by shadow slowness. |
 | `failure_threshold` | int 1–100 | `3` | Consecutive failures (timeout / connect-refused / no node) before auto-disable kicks in (BR-CN-006). |
 | `disable_window_seconds` | int 30–3600 | `300` | How long shadow stays auto-disabled after the threshold breaches; re-enables automatically on expiry. |
+| `sidecar.enabled` | bool | `false` | Enable the structural diff bridge to the Aria Runtime sidecar. |
+| `sidecar.endpoint` | string | `http://127.0.0.1:8081` | Base URL of the sidecar's HTTP layer. `/v1/diff` is appended. |
+| `sidecar.timeout_ms` | int 50–10000 | `500` | Per-request timeout for the sidecar call. On timeout, falls back to basic diff. |
+| `sidecar.max_body_bytes` | int ≥1024 | `1048576` | Cap on primary/shadow body size sent to the sidecar. Above this, falls back to basic diff (no truncation, no false similarity). |
 
-Shadow requests carry an `X-Aria-Shadow: true` header so the shadow upstream can opt out of side effects (writes, notifications, external API calls). The plugin also refuses to shadow any request that already has this header, preventing recursion in chained-gateway setups.
+Shadow requests carry an `X-Aria-Shadow: true` header so the shadow upstream
+can opt out of side effects (writes, notifications, external API calls). The
+plugin also refuses to shadow any request that already has this header,
+preventing recursion in chained-gateway setups.
+
+Streaming responses (`Content-Type: text/event-stream`) are auto-skipped for
+structural diff — a partial SSE body cannot be meaningfully compared — but
+basic diff still runs.
 
 ### 6.7 Prometheus Metrics
 
@@ -577,10 +602,12 @@ Shadow requests carry an `X-Aria-Shadow: true` header so the shadow upstream can
 | `aria_canary_latency_p95` | Gauge | route, version | P95 latency per version |
 | `aria_canary_rollback_total` | Counter | route | Total rollback events |
 | `aria_shadow_requests_total` | Counter | route | Shadow requests fired |
-| `aria_shadow_diff_count` | Counter | route, type | Response differences detected (`type` = `status`\|`body_length`) |
+| `aria_shadow_diff_count` | Counter | route, type | Response differences detected (`type` = `status`\|`body_length`\|`structural`) |
 | `aria_shadow_latency_delta_ms` | Histogram | route | Shadow-minus-primary latency distribution (ms) |
+| `aria_shadow_body_similarity` | Histogram | route | Sørensen-Dice structural similarity in [0.0, 1.0] (only emitted when sidecar bridge is active) |
 | `aria_shadow_upstream_failures` | Counter | route | Shadow upstream failures (timeout / refused) |
 | `aria_shadow_upstream_down` | Counter | route | Auto-disable events (failure threshold breached) |
+| `aria_shadow_sidecar_calls_total` | Counter | route, result | Sidecar diff call outcome (`result` = `ok`\|`error`\|`skipped_oversized`) |
 
 ---
 
@@ -593,7 +620,7 @@ The Aria Runtime is an optional Java 21 sidecar that provides advanced processin
 | Feature | Module | Without Sidecar | With Sidecar |
 |---------|--------|----------------|-------------|
 | Token counting | Shield | Approximate (word heuristic) | Exact (tiktoken) — community tier |
-| Shadow diff | Canary | Basic (status + body length + latency) | Active (structural comparison) — community tier |
+| Shadow diff | Canary | Basic (status + body length + latency) | Structural JSON diff — field-level paths + Sørensen-Dice similarity, community tier |
 | Prompt injection | Shield | Regex only | Regex + vector similarity — enterprise |
 | PII detection | Mask | Regex patterns | Regex + NER (Named Entity Recognition) — enterprise |
 | Content filtering | Shield | Disabled | Active — enterprise |
@@ -604,12 +631,20 @@ The Aria Runtime is an optional Java 21 sidecar that provides advanced processin
 
 ### 7.2 Deployment
 
-The sidecar runs in the same pod as APISIX and communicates via Unix Domain Socket:
+The sidecar runs in the same pod as APISIX. Two transports are available:
 
 ```
-APISIX Container <── UDS (~0.1ms) ──> Aria Runtime Container
+APISIX Container <── UDS (~0.1ms) ───> Aria Runtime Container  (canonical path)
                   /var/run/aria/aria.sock
+
+APISIX Container <── HTTP localhost ──> Aria Runtime Container  (shadow diff bridge)
+                  127.0.0.1:8081
 ```
+
+The gRPC-over-UDS path is the canonical transport for non-Lua clients. The
+shadow diff bridge uses HTTP because the Lua plugin uses `resty.http` — this
+avoids pulling in a Lua gRPC client dependency. Both paths invoke the same
+`DiffEngine`, so output is identical.
 
 ### 7.3 Health Checks
 

@@ -18,6 +18,8 @@ local timer_calls = {}
 local http_response = { status = 200, body = "primary-body" }
 local http_error = nil
 local last_http_request = nil
+local cjson_decode_next = {}          -- Iter 2c: decoded sidecar JSON response
+local hold_body_chunk_next = nil      -- Iter 2c: primary body for body_filter
 
 local function reset_state()
     redis_state = {}
@@ -25,6 +27,8 @@ local function reset_state()
     http_response = { status = 200, body = "primary-body" }
     http_error = nil
     last_http_request = nil
+    cjson_decode_next = {}
+    hold_body_chunk_next = nil
 end
 
 
@@ -42,8 +46,10 @@ _G.ngx = {
     ERR = 1, WARN = 2, INFO = 3, DEBUG = 4,
     status = 200,
     shared = {},  -- ngx.shared["prometheus-metrics"] resolves to nil → metrics no-op
+    encode_base64 = function(s) return "b64:" .. (s or "") end,  -- Iter 2c: sidecar req
     var = {
         bytes_sent = "100",
+        request_id = "req-test",
     },
     req = {
         read_body = function() end,
@@ -64,7 +70,7 @@ _G.ngx = {
 
 package.loaded["cjson.safe"] = {
     encode = function(t) return "{}" end,
-    decode = function(s) return {} end,
+    decode = function(s) return cjson_decode_next end,
     null = "\0",
     empty_table = {},
 }
@@ -76,7 +82,12 @@ package.loaded["apisix.core"] = {
         info = function() end,
         debug = function() end,
     },
-    response = { set_header = function() end },
+    response = {
+        set_header = function() end,
+        -- Iter 2c: body_filter primary body capture. Returns the accumulated
+        -- body only on the final chunk call; intermediate chunks return nil.
+        hold_body_chunk = function(_) return hold_body_chunk_next end,
+    },
     request = { set_header = function() end },
     schema = {
         check = function(schema, conf) return true end,
@@ -434,6 +445,244 @@ describe("aria-canary shadow", function()
             ctx.aria_request_start = ngx.now() - 0.05
             canary.log(make_conf(), ctx)
             assert.are.equal(0, #timer_calls)
+        end)
+    end)
+
+    -- ────────────────────────────────────────────────────────────────────
+    describe("try_sidecar_diff() — Iter 2c bridge", function()
+
+        local function sc_conf(overrides)
+            local conf = make_conf()
+            conf.shadow.sidecar = {
+                enabled        = true,
+                endpoint       = "http://127.0.0.1:8081",
+                timeout_ms     = 500,
+                max_body_bytes = 1048576,
+            }
+            if overrides then
+                for k, v in pairs(overrides) do conf.shadow.sidecar[k] = v end
+            end
+            return conf
+        end
+
+        it("returns nil when sidecar disabled", function()
+            local conf = make_conf()  -- sidecar = nil (default)
+            local r = _G.try_sidecar_diff(conf, "route-1",
+                { status = 200, latency_ms = 50 }, "p-body", 200, "s-body", 60)
+            assert.is_nil(r)
+        end)
+
+        it("returns nil when primary_body is nil (streaming / disabled capture)", function()
+            local r = _G.try_sidecar_diff(sc_conf(), "route-1",
+                { status = 200, latency_ms = 50 }, nil, 200, "s-body", 60)
+            assert.is_nil(r)
+        end)
+
+        it("returns nil when primary body exceeds max_body_bytes", function()
+            local conf = sc_conf({ max_body_bytes = 10 })
+            local r = _G.try_sidecar_diff(conf, "route-1",
+                { status = 200, latency_ms = 50 }, string.rep("x", 100), 200, "s", 60)
+            assert.is_nil(r)
+        end)
+
+        it("returns nil when shadow body exceeds max_body_bytes", function()
+            local conf = sc_conf({ max_body_bytes = 10 })
+            local r = _G.try_sidecar_diff(conf, "route-1",
+                { status = 200, latency_ms = 50 }, "p", 200, string.rep("x", 100), 60)
+            assert.is_nil(r)
+        end)
+
+        it("POSTs to the configured sidecar /v1/diff endpoint", function()
+            cjson_decode_next = {
+                statusMatch = true, bodySimilarity = 1.0, latencyDeltaMs = 10,
+                diffFields = {}, diffSummary = "structural match",
+            }
+            _G.try_sidecar_diff(sc_conf(), "route-1",
+                { status = 200, latency_ms = 50 }, "p-body", 200, "s-body", 60)
+            assert.is_not_nil(last_http_request)
+            assert.are.equal("http://127.0.0.1:8081/v1/diff", last_http_request.url)
+            assert.are.equal("POST", last_http_request.opts.method)
+            assert.are.equal("application/json",
+                last_http_request.opts.headers["Content-Type"])
+        end)
+
+        it("returns structural diff table on sidecar OK", function()
+            cjson_decode_next = {
+                statusMatch = true, bodySimilarity = 0.87, latencyDeltaMs = 15,
+                diffFields = { "tokens" }, diffSummary = "1 field(s) differ",
+            }
+            local r = _G.try_sidecar_diff(sc_conf(), "route-1",
+                { status = 200, latency_ms = 50 }, "p", 200, "s", 65)
+            assert.is_not_nil(r)
+            assert.is_true(r.status_match)
+            assert.are.equal(0.87, r.body_similarity)
+            assert.are.equal(15, r.latency_delta_ms)
+            assert.are.equal("structural", r.diff_type)
+            assert.is_true(r.has_diff)
+            assert.are.same({ "tokens" }, r.diff_fields)
+        end)
+
+        it("marks diff_type=status when sidecar reports status mismatch", function()
+            cjson_decode_next = {
+                statusMatch = false, bodySimilarity = 1.0, latencyDeltaMs = 0,
+                diffFields = {}, diffSummary = "status mismatch",
+            }
+            local r = _G.try_sidecar_diff(sc_conf(), "route-1",
+                { status = 200, latency_ms = 50 }, "p", 500, "s", 60)
+            assert.is_not_nil(r)
+            assert.is_false(r.status_match)
+            assert.are.equal("status", r.diff_type)
+            assert.is_true(r.has_diff)
+        end)
+
+        it("returns nil when sidecar returns non-200", function()
+            http_response = { status = 500, body = "" }
+            cjson_decode_next = { statusMatch = true, bodySimilarity = 1.0 }
+            local r = _G.try_sidecar_diff(sc_conf(), "route-1",
+                { status = 200, latency_ms = 50 }, "p", 200, "s", 60)
+            assert.is_nil(r)
+        end)
+
+        it("returns nil when sidecar is unreachable (HTTP error)", function()
+            http_error = "connection refused"
+            local r = _G.try_sidecar_diff(sc_conf(), "route-1",
+                { status = 200, latency_ms = 50 }, "p", 200, "s", 60)
+            assert.is_nil(r)
+        end)
+
+        it("returns nil when sidecar body fails to parse", function()
+            http_response = { status = 200, body = "not-json" }
+            cjson_decode_next = nil  -- decoder returns nil → parse failure
+            local r = _G.try_sidecar_diff(sc_conf(), "route-1",
+                { status = 200, latency_ms = 50 }, "p", 200, "s", 60)
+            assert.is_nil(r)
+        end)
+
+        it("returns no_diff when sidecar reports identical structural match", function()
+            cjson_decode_next = {
+                statusMatch = true, bodySimilarity = 1.0, latencyDeltaMs = 5,
+                diffFields = {}, diffSummary = "structural match",
+            }
+            local r = _G.try_sidecar_diff(sc_conf(), "route-1",
+                { status = 200, latency_ms = 50 }, "p", 200, "s", 55)
+            assert.is_not_nil(r)
+            assert.is_false(r.has_diff)
+            assert.is_nil(r.diff_type)
+        end)
+    end)
+
+    -- ────────────────────────────────────────────────────────────────────
+    describe("fire_shadow() with sidecar bridge", function()
+
+        local function sc_conf()
+            local conf = make_conf()
+            conf.shadow.sidecar = {
+                enabled = true, endpoint = "http://127.0.0.1:8081",
+                timeout_ms = 500, max_body_bytes = 1048576,
+            }
+            return conf
+        end
+
+        it("uses sidecar diff when primary_body is captured and sidecar enabled", function()
+            -- Order: shadow upstream responds with http_response; then sidecar responds
+            -- with same mocked httpc. Since our mock returns the same http_response for
+            -- both calls, set it to a 200/structural match response and control the
+            -- decode value for sidecar diff parsing.
+            cjson_decode_next = {
+                statusMatch = true, bodySimilarity = 0.9, latencyDeltaMs = 5,
+                diffFields = { "meta" }, diffSummary = "1 field(s) differ",
+            }
+            _G.fire_shadow(false, sc_conf(), "route-1",
+                { uri = "/x", method = "GET", body = nil, headers = {} },
+                { status = 200, bytes_sent = 100, latency_ms = 50 },
+                '{"primary":"body"}')
+            -- last_http_request is the most recent call — the sidecar POST.
+            assert.are.equal("http://127.0.0.1:8081/v1/diff", last_http_request.url)
+        end)
+
+        it("falls back to basic diff when no primary_body provided", function()
+            _G.fire_shadow(false, sc_conf(), "route-1",
+                { uri = "/x", method = "GET", body = nil, headers = {} },
+                { status = 200, bytes_sent = 100, latency_ms = 50 },
+                nil)  -- no primary_body
+            -- last call was to shadow upstream, not sidecar
+            assert.are.equal("http://shadow-host:8080/x", last_http_request.url)
+        end)
+
+        it("falls back to basic diff when sidecar is unreachable", function()
+            -- With http_error set, BOTH shadow upstream AND sidecar will fail.
+            -- fire_shadow should short-circuit on shadow upstream failure, before
+            -- reaching the sidecar. Verify by ensuring the sidecar endpoint was
+            -- never reached.
+            http_error = "refused"
+            _G.fire_shadow(false, sc_conf(), "route-1",
+                { uri = "/x", method = "GET", body = nil, headers = {} },
+                { status = 200, bytes_sent = 100, latency_ms = 50 },
+                '{"p":1}')
+            -- Shadow upstream call was attempted (URL set to shadow, not sidecar)
+            assert.are.equal("http://shadow-host:8080/x", last_http_request.url)
+        end)
+    end)
+
+    -- ────────────────────────────────────────────────────────────────────
+    describe("_M.body_filter() — primary body capture (Iter 2c)", function()
+
+        local function sc_conf()
+            local conf = make_conf()
+            conf.shadow.sidecar = {
+                enabled = true, endpoint = "http://127.0.0.1:8081",
+                timeout_ms = 500, max_body_bytes = 100,
+            }
+            return conf
+        end
+
+        it("does nothing when no shadow payload captured", function()
+            local ctx = make_ctx()  -- no aria_shadow_payload
+            hold_body_chunk_next = "should-not-be-captured"
+            canary.body_filter(sc_conf(), ctx)
+            assert.is_nil(ctx.aria_primary_body)
+        end)
+
+        it("does nothing when sidecar bridge is disabled", function()
+            local ctx = make_ctx()
+            ctx.aria_shadow_payload = { uri = "/x", method = "GET", body = nil, headers = {} }
+            hold_body_chunk_next = "body-would-be-here"
+            canary.body_filter(make_conf(), ctx)  -- no sidecar config
+            assert.is_nil(ctx.aria_primary_body)
+        end)
+
+        it("skips streaming responses (text/event-stream)", function()
+            local ctx = make_ctx()
+            ctx.aria_shadow_payload = { uri = "/x", method = "GET", body = nil, headers = {} }
+            hold_body_chunk_next = "event: ping\n\n"
+            _G.ngx.header = { ["Content-Type"] = "text/event-stream" }
+            canary.body_filter(sc_conf(), ctx)
+            assert.is_nil(ctx.aria_primary_body)
+            _G.ngx.header = {}
+        end)
+
+        it("does not capture when hold_body_chunk returns nil (mid-stream)", function()
+            local ctx = make_ctx()
+            ctx.aria_shadow_payload = { uri = "/x", method = "GET", body = nil, headers = {} }
+            hold_body_chunk_next = nil
+            canary.body_filter(sc_conf(), ctx)
+            assert.is_nil(ctx.aria_primary_body)
+        end)
+
+        it("skips oversized bodies without capturing", function()
+            local ctx = make_ctx()
+            ctx.aria_shadow_payload = { uri = "/x", method = "GET", body = nil, headers = {} }
+            hold_body_chunk_next = string.rep("x", 500)  -- > max_body_bytes=100
+            canary.body_filter(sc_conf(), ctx)
+            assert.is_nil(ctx.aria_primary_body)
+        end)
+
+        it("captures body when shadow active, sidecar enabled, within size cap", function()
+            local ctx = make_ctx()
+            ctx.aria_shadow_payload = { uri = "/x", method = "GET", body = nil, headers = {} }
+            hold_body_chunk_next = '{"ok":true}'
+            canary.body_filter(sc_conf(), ctx)
+            assert.are.equal('{"ok":true}', ctx.aria_primary_body)
         end)
     end)
 

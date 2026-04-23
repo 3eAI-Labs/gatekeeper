@@ -5,7 +5,7 @@ Aria Runtime is the high-performance processing backend for 3e-Aria-Gatekeeper p
 | Feature | Module | What It Does | Tier |
 |---------|--------|-------------|------|
 | **Token Counting** | Shield | Exact tiktoken counting for billing accuracy | Community |
-| **Shadow Diff Engine** | Canary | Structural comparison of primary vs. shadow responses | Community |
+| **Shadow Diff Engine** | Canary | JSON-aware structural diff (primary vs. shadow), field-level paths + Sørensen-Dice similarity | Community |
 | **Prompt Analysis** | Shield | Vector-similarity injection detection beyond regex | Enterprise |
 | **Content Filtering** | Shield | LLM response moderation | Enterprise |
 | **NER PII Detection** | Mask | Named Entity Recognition for PII beyond regex patterns | Enterprise |
@@ -18,21 +18,25 @@ image and activated at runtime when a valid license key is present.
 ## Architecture
 
 ```
-┌─────────────────── APISIX Pod ───────────────────┐
-│                                                    │
-│  APISIX Container          Aria Runtime Container  │
-│  ┌──────────────┐          ┌───────────────────┐  │
-│  │ Lua Plugins  │◄─ UDS ──►│ gRPC Server       │  │
-│  │ (aria-*)     │  ~0.1ms  │ (Java 21)         │  │
-│  └──────────────┘          │ Virtual Threads    │  │
-│                            │ ScopedValue        │  │
-│                            └───────────────────┘  │
-│                                                    │
-│  Shared Volume: /var/run/aria/aria.sock             │
-└────────────────────────────────────────────────────┘
+┌────────────────────── APISIX Pod ──────────────────────┐
+│                                                          │
+│  APISIX Container            Aria Runtime Container      │
+│  ┌──────────────┐            ┌────────────────────┐     │
+│  │ Lua Plugins  │◄── UDS ───►│ gRPC Server        │     │
+│  │ (aria-*)     │            │ (canonical path)   │     │
+│  │              │◄── HTTP ──►│ Spring Boot REST   │     │
+│  │              │            │ (shadow diff bridge)│    │
+│  └──────────────┘            │ Java 21 VTs        │     │
+│                              └────────────────────┘     │
+│                                                          │
+│  Shared Volume: /var/run/aria/aria.sock (UDS)            │
+│  Localhost port 8081 (HTTP bridge)                       │
+└──────────────────────────────────────────────────────────┘
 ```
 
-**Communication:** gRPC over Unix Domain Socket (~0.1ms round-trip)
+**Communication:** gRPC over UDS (canonical, ~0.1ms RTT); HTTP/JSON over
+localhost for the Lua-to-sidecar shadow diff bridge (first-class `resty.http`
+support avoids adding a Lua gRPC dependency; same `DiffEngine` serves both paths).
 **Threading:** Java 21 Virtual Threads (10K+ concurrent requests)
 **Context:** ScopedValue (not ThreadLocal) for per-request propagation
 
@@ -43,10 +47,14 @@ The Lua plugins work **standalone without the sidecar**. When the runtime is una
 | Feature | With Runtime | Without Runtime | Tier |
 |---------|-------------|-----------------|------|
 | Token counting | Exact (tiktoken) | Approximate (word heuristic) | Community |
-| Shadow diff | Active | Basic (status + body length + latency) | Community |
+| Shadow diff | Structural JSON diff (field paths + similarity) | Basic (status + body length + latency) | Community |
 | Prompt injection detection | Regex + vector similarity | Regex only | Enterprise |
 | PII detection | Regex + NER | Regex only | Enterprise |
 | Content filtering | Active | Disabled | Enterprise |
+
+If the HTTP bridge is temporarily unreachable (sidecar restarting, network
+partition), shadow diff silently falls back to the basic diff for that
+request — no primary traffic impact.
 
 ## Getting Started
 

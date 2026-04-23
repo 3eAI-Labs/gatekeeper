@@ -63,7 +63,9 @@ local schema = {
         retry_cooldown  = { type = "string", default = "10m" },
         max_retries     = { type = "integer", minimum = 0, maximum = 10, default = 3 },
         consistent_hash = { type = "boolean", default = true },
-        -- Traffic shadowing (BR-CN-006). Iter 1: Lua-only basic diff.
+        -- Traffic shadowing (BR-CN-006 / US-C06 + US-C07).
+        --   Iter 1: Lua-only basic diff (status + body length + latency).
+        --   Iter 2c: optional bridge to aria-runtime sidecar for structural JSON diff.
         shadow = {
             type = "object",
             properties = {
@@ -80,6 +82,21 @@ local schema = {
                 timeout_ms        = { type = "integer", minimum = 100, maximum = 30000, default = 2000 },
                 failure_threshold = { type = "integer", minimum = 1, maximum = 100, default = 3 },
                 disable_window_seconds = { type = "integer", minimum = 30, maximum = 3600, default = 300 },
+                -- Optional sidecar bridge for structural JSON diff (Iter 2c).
+                -- When enabled AND bodies fit within max_body_bytes, the log-phase
+                -- timer POSTs primary+shadow to the sidecar's /v1/diff endpoint
+                -- and uses the structural result. Any failure silently falls back
+                -- to the basic diff, so shadow never blocks on the sidecar.
+                sidecar = {
+                    type = "object",
+                    properties = {
+                        enabled        = { type = "boolean", default = false },
+                        endpoint       = { type = "string", default = "http://127.0.0.1:8081" },
+                        timeout_ms     = { type = "integer", minimum = 50, maximum = 10000, default = 500 },
+                        max_body_bytes = { type = "integer", minimum = 1024, maximum = 10485760, default = 1048576 },
+                    },
+                    default = { enabled = false },
+                },
             },
             default = { enabled = false },
         },
@@ -306,6 +323,41 @@ end
 
 
 -- ────────────────────────────────────────────────────────────────────────────
+-- Body Filter: Primary Response Body Capture (Iter 2c — sidecar bridge)
+-- Only activates when shadow sampled AND sidecar bridge is enabled, so the
+-- hold_body_chunk cost is skipped for unrelated traffic.
+-- ────────────────────────────────────────────────────────────────────────────
+
+function _M.body_filter(conf, ctx)
+    if not ctx.aria_shadow_payload then return end
+
+    local sc = conf.shadow and conf.shadow.sidecar
+    if not sc or not sc.enabled then return end
+
+    -- Skip streaming responses (SSE) — structural diff needs a complete body.
+    local content_type = ngx.header["Content-Type"] or ""
+    if content_type:find("text/event-stream", 1, true) then
+        return
+    end
+
+    local body = core.response.hold_body_chunk(ctx)
+    if not body then return end  -- still accumulating chunks
+
+    -- Size cap: leave ctx.aria_primary_body nil so fire_shadow falls back to basic diff.
+    local max_bytes = sc.max_body_bytes or 1048576
+    if #body > max_bytes then
+        aria_core.counter_inc("aria_shadow_sidecar_calls_total", 1, {
+            route  = ctx.var.route_id or "unknown",
+            result = "skipped_oversized",
+        })
+        return
+    end
+
+    ctx.aria_primary_body = body
+end
+
+
+-- ────────────────────────────────────────────────────────────────────────────
 -- Log Phase: Error Tracking & Stage Progression (BR-CN-002, BR-CN-003, BR-CN-004)
 -- ────────────────────────────────────────────────────────────────────────────
 
@@ -322,7 +374,10 @@ function _M.log(conf, ctx)
             bytes_sent = tonumber(ctx.var.bytes_sent) or 0,
             latency_ms = latency * 1000,
         }
-        local ok, terr = ngx.timer.at(0, fire_shadow, conf, route_id, ctx.aria_shadow_payload, primary)
+        -- aria_primary_body may be nil (sidecar disabled, streaming, or oversized);
+        -- fire_shadow treats nil as "basic diff only".
+        local ok, terr = ngx.timer.at(0, fire_shadow, conf, route_id,
+            ctx.aria_shadow_payload, primary, ctx.aria_primary_body)
         if not ok then
             aria_core.log_error("shadow_timer_failed",
                 str_fmt("Failed to schedule shadow for route %s: %s", route_id, terr or "unknown"))
@@ -766,8 +821,96 @@ function compute_basic_diff(primary, shadow)
     }
 end
 
+--- Try structural diff via the sidecar bridge (Iter 2c). Returns a diff table
+-- in the same shape as compute_basic_diff, OR nil when the sidecar is skipped,
+-- unreachable, or the response is unparseable — caller must then fall back.
+function try_sidecar_diff(conf, route_id, primary, primary_body, shadow_status, shadow_body, shadow_latency_ms)
+    local sc = conf.shadow and conf.shadow.sidecar
+    if not sc or not sc.enabled then return nil end
+    if not primary_body then return nil end  -- streaming / oversized / disabled
+
+    local max_bytes = sc.max_body_bytes or 1048576
+    if #primary_body > max_bytes or (shadow_body and #shadow_body > max_bytes) then
+        aria_core.counter_inc("aria_shadow_sidecar_calls_total", 1, {
+            route = route_id, result = "skipped_oversized",
+        })
+        return nil
+    end
+
+    local req_payload = cjson.encode({
+        requestId        = ngx.var.request_id or "",
+        routeId          = route_id,
+        primaryStatus    = primary.status,
+        primaryBody      = ngx.encode_base64(primary_body),
+        primaryLatencyMs = math_floor(primary.latency_ms),
+        shadowStatus     = shadow_status,
+        shadowBody       = ngx.encode_base64(shadow_body or ""),
+        shadowLatencyMs  = math_floor(shadow_latency_ms),
+    })
+
+    local httpc = require("resty.http").new()
+    httpc:set_timeout(sc.timeout_ms or 500)
+
+    local endpoint = (sc.endpoint or "http://127.0.0.1:8081") .. "/v1/diff"
+    local res, err = httpc:request_uri(endpoint, {
+        method  = "POST",
+        body    = req_payload,
+        headers = { ["Content-Type"] = "application/json" },
+    })
+
+    if not res or res.status ~= 200 then
+        aria_core.counter_inc("aria_shadow_sidecar_calls_total", 1, {
+            route  = route_id,
+            result = "error",
+        })
+        aria_core.log_warn("shadow_sidecar_unavailable",
+            str_fmt("Sidecar diff failed for route %s: %s",
+                route_id, err or ("http_" .. (res and res.status or "unknown"))))
+        return nil
+    end
+
+    local parsed = cjson.decode(res.body or "")
+    if not parsed then
+        aria_core.counter_inc("aria_shadow_sidecar_calls_total", 1, {
+            route = route_id, result = "error",
+        })
+        return nil
+    end
+
+    aria_core.counter_inc("aria_shadow_sidecar_calls_total", 1, {
+        route = route_id, result = "ok",
+    })
+
+    local similarity = tonumber(parsed.bodySimilarity) or 0
+    aria_core.histogram_observe("aria_shadow_body_similarity",
+        similarity, { route = route_id })
+
+    local status_match = parsed.statusMatch == true
+    local has_diff = (not status_match) or similarity < 1.0
+    local diff_type
+    if not status_match then
+        diff_type = "status"
+    elseif similarity < 1.0 then
+        diff_type = "structural"
+    end
+
+    return {
+        status_match      = status_match,
+        body_similarity   = similarity,
+        latency_delta_ms  = tonumber(parsed.latencyDeltaMs) or 0,
+        has_diff          = has_diff,
+        diff_type         = diff_type,
+        diff_fields       = parsed.diffFields,
+        diff_summary      = parsed.diffSummary,
+    }
+end
+
+
 --- ngx.timer callback: fire shadow request, record metrics, update failure state.
-function fire_shadow(premature, conf, route_id, payload, primary)
+-- @param primary_body  Full primary response body (nil if sidecar disabled /
+--                      streaming / oversized); triggers the sidecar bridge path
+--                      when present, falls back to basic diff otherwise.
+function fire_shadow(premature, conf, route_id, payload, primary, primary_body)
     if premature then return end
 
     aria_core.counter_inc("aria_shadow_requests_total", 1, { route = route_id })
@@ -799,11 +942,17 @@ function fire_shadow(premature, conf, route_id, payload, primary)
 
     reset_shadow_failures(conf, route_id)
 
-    local diff = compute_basic_diff(primary, {
-        status     = res.status,
-        body       = res.body,
-        latency_ms = shadow_latency_ms,
-    })
+    -- Try structural diff via sidecar; fall back to basic diff on any failure.
+    local diff = try_sidecar_diff(conf, route_id, primary, primary_body,
+        res.status, res.body, shadow_latency_ms)
+
+    if not diff then
+        diff = compute_basic_diff(primary, {
+            status     = res.status,
+            body       = res.body,
+            latency_ms = shadow_latency_ms,
+        })
+    end
 
     aria_core.histogram_observe("aria_shadow_latency_delta_ms",
         diff.latency_delta_ms, { route = route_id })
