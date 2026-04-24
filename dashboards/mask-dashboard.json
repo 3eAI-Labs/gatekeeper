@@ -28,6 +28,29 @@
         "title": "Large Body Skips",
         "type": "stat",
         "targets": [{ "expr": "sum(aria_mask_skip_large_body)" }]
+      },
+      {
+        "title": "NER Sidecar Calls by Outcome",
+        "type": "timeseries",
+        "description": "ok = served; error/parse_error = sidecar problem; circuit_open = Lua breaker tripped; fail_closed_redacted = defensive fallback",
+        "targets": [{ "expr": "sum(rate(aria_mask_ner_calls_total[5m])) by (result)" }]
+      },
+      {
+        "title": "NER Entities Detected",
+        "type": "timeseries",
+        "description": "Entities found per type (PERSON/LOCATION/ORGANIZATION/MISC)",
+        "targets": [{ "expr": "sum(rate(aria_mask_ner_entities_total[5m])) by (type)" }]
+      },
+      {
+        "title": "NER Bridge Latency P95",
+        "type": "timeseries",
+        "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(aria_mask_ner_latency_ms_bucket[5m])) by (le, route))" }]
+      },
+      {
+        "title": "NER Circuit Breaker State",
+        "type": "stat",
+        "description": "0 = closed (healthy), 1 = open (short-circuiting), 2 = half_open (probing)",
+        "targets": [{ "expr": "aria_mask_ner_circuit_state" }]
       }
     ]
   }

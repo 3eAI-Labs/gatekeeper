@@ -8,6 +8,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+#### Module B: 3e-Aria-Mask
+- **NER-based PII detection** — Mask plugin now delegates named-entity detection (PERSON / LOCATION / ORGANIZATION / MISC) to the `aria-runtime` sidecar over an HTTP bridge (POST `/v1/mask/detect`). Regex-only detection remains the default; enable `ner.sidecar.enabled=true` to activate. Runs inline in `body_filter` after regex so the ML model never sees fields already classified as structural PII (BR-MK-006).
+  - New schema block: `ner.sidecar.{enabled, endpoint, timeout_ms, max_content_bytes, fail_mode, min_confidence, circuit_breaker.{failure_threshold, cooldown_ms}, entity_strategy}`.
+  - **Turkish-first positioning:** ships with pluggable engines — Apache OpenNLP for English + DJL/ONNX Runtime for Turkish BERT (default model: `savasy/bert-base-turkish-ner-cased`). Add new languages by implementing the Java `NerEngine` interface and listing the id in `aria.mask.ner.engines`.
+  - **Fail modes:** `open` (default, availability-first — regex-only result if sidecar unreachable) or `closed` (defensive — all candidate fields redacted when NER cannot verify).
+  - **Circuit breaker:** per-endpoint breaker in Lua (`ngx.shared.dict` state) short-circuits before HTTP call when the sidecar is unhealthy. Paired with a Resilience4j breaker inside the JVM for defense in depth.
+  - New Lua lib: `apisix/plugins/lib/aria-circuit-breaker.lua` — generic, reusable by future sidecar bridges.
+  - New metrics: `aria_mask_ner_calls_total{route,result}`, `aria_mask_ner_latency_ms` (histogram), `aria_mask_ner_entities_total{type}`, `aria_mask_ner_circuit_state{endpoint}` (gauge).
+  - Unit tests: 32 new Lua tests covering circuit breaker state machine, content collection, offset-to-field mapping, sidecar success + every failure mode, and breaker interaction.
+
 #### Module C: 3e-Aria-Canary
 - **Traffic shadowing — basic diff (Iter 1)** — Fire-and-forget duplication of a configurable percentage of live traffic to a shadow upstream, with Lua-side basic diff (HTTP status, body length, latency delta) and Prometheus metrics. Sidecar-based structural diff lands in Iter 2 (US-C06, US-C07, BR-CN-006).
   - New schema block: `shadow.{enabled, traffic_pct, shadow_upstream.nodes, timeout_ms, failure_threshold, disable_window_seconds}`.

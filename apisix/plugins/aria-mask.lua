@@ -10,12 +10,25 @@
 --               US-B04 (strategies), US-B05 (audit)
 --
 
-local core           = require("apisix.core")
-local cjson          = require("cjson.safe")
-local ngx            = ngx
-local aria_core      = require("apisix.plugins.lib.aria-core")
-local aria_pii       = require("apisix.plugins.lib.aria-pii")
-local mask_strategies = require("apisix.plugins.lib.aria-mask-strategies")
+local core             = require("apisix.core")
+local cjson            = require("cjson.safe")
+local ngx              = ngx
+local aria_core        = require("apisix.plugins.lib.aria-core")
+local aria_pii         = require("apisix.plugins.lib.aria-pii")
+local mask_strategies  = require("apisix.plugins.lib.aria-mask-strategies")
+local circuit_breaker  = require("apisix.plugins.lib.aria-circuit-breaker")
+local str_fmt          = string.format
+
+-- Sentinel delimiter used when concatenating field values into a single
+-- NER request. Byte value 0x01 is forbidden in JSON strings (RFC 8259 § 7),
+-- so real response bodies can't contain it, which means no entity returned
+-- by the sidecar can straddle two concatenated fields.
+local NER_DELIM = "\1"
+
+-- Per-worker cache of circuit breakers keyed by sidecar endpoint.
+-- One worker holds one breaker per endpoint; state persists in the shared
+-- dict so sibling workers see the same breaker state.
+local ner_breakers = {}
 
 local plugin_name = "aria-mask"
 
@@ -66,6 +79,56 @@ local schema = {
             },
         },
         max_body_size = { type = "integer", minimum = 1024, default = 10485760 },
+        -- NER via aria-runtime sidecar bridge (BR-MK-006).
+        --   enabled=false (default): regex-only detection — no extra latency,
+        --     no external dependency. Matches v0.1 behaviour.
+        --   enabled=true: after regex pass, unmasked string leaves are sent
+        --     to the sidecar's /v1/mask/detect endpoint for named-entity
+        --     detection (PERSON/LOCATION/ORGANIZATION). Returned entities
+        --     are masked per entity_strategy.
+        -- Hot-path semantics — unlike canary's shadow diff, this bridge runs
+        -- inline in body_filter; the Lua outer circuit breaker and the Java
+        -- inner breaker are defense in depth.
+        ner = {
+            type = "object",
+            properties = {
+                sidecar = {
+                    type = "object",
+                    properties = {
+                        enabled           = { type = "boolean", default = false },
+                        endpoint          = { type = "string", default = "http://127.0.0.1:8081" },
+                        timeout_ms        = { type = "integer", minimum = 50, maximum = 10000, default = 500 },
+                        max_content_bytes = { type = "integer", minimum = 1024, maximum = 10485760, default = 131072 },
+                        -- On sidecar unreachable / open breaker:
+                        --   "open"   : return response with regex-only masking (default, availability)
+                        --   "closed" : block response with 503 (stricter privacy, e.g. healthcare)
+                        fail_mode         = { type = "string", enum = {"open", "closed"}, default = "open" },
+                        min_confidence    = { type = "number", minimum = 0.0, maximum = 1.0, default = 0.7 },
+                        circuit_breaker   = {
+                            type = "object",
+                            properties = {
+                                failure_threshold = { type = "integer", minimum = 1, maximum = 100, default = 5 },
+                                cooldown_ms       = { type = "integer", minimum = 1000, maximum = 3600000, default = 30000 },
+                            },
+                            default = {},
+                        },
+                        -- Per-entity-type masking strategy. Falls back to "redact".
+                        entity_strategy   = {
+                            type = "object",
+                            additionalProperties = { type = "string" },
+                            default = {
+                                PERSON       = "redact",
+                                LOCATION     = "redact",
+                                ORGANIZATION = "redact",
+                                MISC         = "redact",
+                            },
+                        },
+                    },
+                    default = { enabled = false },
+                },
+            },
+            default = {},
+        },
         -- Redis for tokenization strategy
         redis_host     = { type = "string", default = "127.0.0.1" },
         redis_port     = { type = "integer", default = 6379 },
@@ -267,6 +330,177 @@ end
 
 
 -- ────────────────────────────────────────────────────────────────────────────
+-- NER Sidecar Bridge (BR-MK-006)
+-- ────────────────────────────────────────────────────────────────────────────
+
+--- Walk the parsed JSON body and collect every string leaf that:
+--   - isn't empty or too short to carry a named entity (len >= 3),
+--   - wasn't already masked by explicit rules or regex auto-detect.
+-- Returns { parts, total_len } where total_len includes the delimiter bytes
+-- that will sit between values in the concatenated buffer.
+local function collect_ner_candidates(obj, already_masked_paths)
+    local parts = {}
+    local total_len = 0
+
+    local function recurse(node, current_path)
+        if type(node) ~= "table" then return end
+        for k, v in pairs(node) do
+            local kp = current_path .. "." .. tostring(k)
+            if type(v) == "string" then
+                if #v >= 3 and not already_masked_paths[kp] then
+                    parts[#parts + 1] = {
+                        path   = kp,
+                        value  = v,
+                        parent = node,
+                        key    = k,
+                    }
+                    total_len = total_len + #v + 1  -- +1 for delimiter
+                end
+            elseif type(v) == "table" then
+                recurse(v, kp)
+            end
+        end
+    end
+    recurse(obj, "$")
+    return parts, total_len
+end
+
+
+--- Resolve (or lazily create) the circuit breaker for a given sidecar endpoint.
+local function get_ner_breaker(endpoint, cb_conf)
+    if not endpoint or endpoint == "" then return nil end
+    local cached = ner_breakers[endpoint]
+    if cached then return cached end
+
+    local dict = ngx.shared["prometheus-metrics"]
+    if not dict then
+        aria_core.log_warn("ner_breaker_no_dict",
+            "prometheus-metrics shared dict missing; NER circuit breaker disabled")
+        return nil
+    end
+    local cb, err = circuit_breaker.new(dict, "ner:" .. endpoint, {
+        failure_threshold = (cb_conf or {}).failure_threshold or 5,
+        cooldown_ms       = (cb_conf or {}).cooldown_ms or 30000,
+    })
+    if not cb then
+        aria_core.log_warn("ner_breaker_init_failed", err or "unknown")
+        return nil
+    end
+    ner_breakers[endpoint] = cb
+    return cb
+end
+
+
+--- Call the sidecar's /v1/mask/detect endpoint. On success returns the parsed
+-- entities list; on any failure returns (nil, reason) where reason is one of:
+--   "disabled", "circuit_open", "oversized", "error", "parse_error", "empty".
+-- Caller decides what to do with the failure based on fail_mode.
+local function try_sidecar_ner(sc, route_id, content, breaker)
+    if not sc.enabled then return nil, "disabled" end
+    if not content or #content == 0 then return nil, "empty" end
+    if #content > (sc.max_content_bytes or 131072) then
+        aria_core.counter_inc("aria_mask_ner_calls_total", 1, {
+            route = route_id, result = "skipped_oversized",
+        })
+        return nil, "oversized"
+    end
+    if breaker and not breaker:allow() then
+        aria_core.counter_inc("aria_mask_ner_calls_total", 1, {
+            route = route_id, result = "circuit_open",
+        })
+        return nil, "circuit_open"
+    end
+
+    local payload = cjson.encode({
+        requestId          = ngx.var.request_id or "",
+        routeId            = route_id,
+        content            = content,
+        alreadyMaskedPaths = {},  -- passed through only; engine ignores
+    })
+
+    local http = require("resty.http")
+    local httpc = http.new()
+    httpc:set_timeout(sc.timeout_ms or 500)
+
+    local endpoint = (sc.endpoint or "http://127.0.0.1:8081") .. "/v1/mask/detect"
+    local start_ms = ngx.now() * 1000
+    local res, err = httpc:request_uri(endpoint, {
+        method  = "POST",
+        body    = payload,
+        headers = { ["Content-Type"] = "application/json" },
+    })
+    local elapsed_ms = (ngx.now() * 1000) - start_ms
+    aria_core.histogram_observe("aria_mask_ner_latency_ms",
+        elapsed_ms, { route = route_id })
+
+    if not res or res.status ~= 200 then
+        if breaker then breaker:record_failure() end
+        aria_core.counter_inc("aria_mask_ner_calls_total", 1, {
+            route = route_id, result = "error",
+        })
+        aria_core.log_warn("mask_ner_unavailable",
+            str_fmt("NER sidecar failed for route %s: %s",
+                route_id, err or ("http_" .. (res and res.status or "unknown"))))
+        return nil, "error"
+    end
+
+    local parsed = cjson.decode(res.body or "")
+    if not parsed or type(parsed.entities) ~= "table" then
+        if breaker then breaker:record_failure() end
+        aria_core.counter_inc("aria_mask_ner_calls_total", 1, {
+            route = route_id, result = "parse_error",
+        })
+        return nil, "parse_error"
+    end
+
+    if breaker then breaker:record_success() end
+    aria_core.counter_inc("aria_mask_ner_calls_total", 1, {
+        route = route_id, result = "ok",
+    })
+    if breaker then
+        aria_core.gauge_set("aria_mask_ner_circuit_state",
+            breaker:raw_state(), { endpoint = sc.endpoint or "default" })
+    end
+    return parsed.entities
+end
+
+
+--- Given a list of parts and the entities returned by the sidecar, pair each
+-- entity with the part whose offset range fully contains it. Entities that
+-- straddle the delimiter (and so two fields) are discarded — the delimiter
+-- byte is reserved, so straddling indicates either a model quirk or an
+-- offset-arithmetic mismatch; either way, not safe to apply.
+local function assign_entities_to_parts(entities, parts, min_confidence)
+    local ranges = {}
+    local offset = 0
+    for i, p in ipairs(parts) do
+        ranges[i] = { start = offset, stop = offset + #p.value }
+        offset = offset + #p.value + #NER_DELIM
+    end
+
+    local assignments = {}
+    for _, e in ipairs(entities) do
+        local s = tonumber(e.start)
+        local en = tonumber(e["end"])
+        local conf = tonumber(e.confidence) or 0
+        if s and en and en > s and conf >= (min_confidence or 0) then
+            for i, r in ipairs(ranges) do
+                if r.start <= s and en <= r.stop then
+                    assignments[#assignments + 1] = {
+                        part_index = i,
+                        entity_type = e.entityType or "MISC",
+                        confidence  = conf,
+                    }
+                    break
+                end
+            end
+        end
+    end
+    return assignments
+end
+
+
+-- ────────────────────────────────────────────────────────────────────────────
 -- Plugin Phases
 -- ────────────────────────────────────────────────────────────────────────────
 
@@ -385,6 +619,84 @@ function _M.body_filter(conf, ctx)
         end
     end
 
+    -- Step 3: NER via sidecar bridge (BR-MK-006)
+    --   Runs after regex so the model never sees fields already classified as
+    --   PAN/MSISDN/TC/etc. — cheaper calls, fewer false positives on structured
+    --   identifiers the model wasn't trained on.
+    local ner_sc = conf.ner and conf.ner.sidecar
+    if ner_sc and ner_sc.enabled then
+        local route_id = ctx.var.route_id or "unknown"
+        local ner_parts, ner_total_len =
+            collect_ner_candidates(json_body, already_masked_paths)
+
+        if #ner_parts > 0 then
+            local values = {}
+            for i, p in ipairs(ner_parts) do values[i] = p.value end
+            local ner_content = table.concat(values, NER_DELIM)
+
+            local breaker = get_ner_breaker(ner_sc.endpoint, ner_sc.circuit_breaker)
+            local entities, ner_err = try_sidecar_ner(
+                ner_sc, route_id, ner_content, breaker)
+
+            if entities then
+                local assignments = assign_entities_to_parts(
+                    entities, ner_parts, ner_sc.min_confidence)
+
+                for _, a in ipairs(assignments) do
+                    local part = ner_parts[a.part_index]
+                    -- Type-specific strategy override via role, then per-entity
+                    -- default, then hard-coded "redact" failsafe.
+                    local default_strategy =
+                        (ner_sc.entity_strategy or {})[a.entity_type] or "redact"
+                    local strategy = resolve_strategy(
+                        conf, role, a.entity_type, default_strategy)
+
+                    if strategy ~= "full" and not already_masked_paths[part.path] then
+                        local masked_value = mask_strategies.apply(strategy, part.value)
+                        part.parent[part.key] = masked_value
+                        already_masked_paths[part.path] = true
+
+                        masked_fields[#masked_fields + 1] = {
+                            path     = part.path,
+                            strategy = strategy,
+                            rule_id  = "ner:" .. a.entity_type,
+                            pii_type = a.entity_type,
+                            source   = "ner_sidecar",
+                        }
+
+                        aria_core.counter_inc("aria_mask_ner_entities_total", 1, {
+                            type = a.entity_type,
+                        })
+                    end
+                end
+            elseif ner_err == "error" or ner_err == "parse_error"
+                    or ner_err == "circuit_open" then
+                -- Fail-closed: redact every candidate field with "redact" as a
+                -- defensive measure when we can't verify what's inside them.
+                -- fail-open (default) silently continues with regex-only output.
+                if ner_sc.fail_mode == "closed" then
+                    for _, part in ipairs(ner_parts) do
+                        if not already_masked_paths[part.path] then
+                            part.parent[part.key] =
+                                mask_strategies.apply("redact", part.value)
+                            already_masked_paths[part.path] = true
+                            masked_fields[#masked_fields + 1] = {
+                                path     = part.path,
+                                strategy = "redact",
+                                rule_id  = "ner:fail_closed",
+                                pii_type = "UNKNOWN",
+                                source   = "ner_fail_closed",
+                            }
+                        end
+                    end
+                    aria_core.counter_inc("aria_mask_ner_calls_total", 1, {
+                        route = route_id, result = "fail_closed_redacted",
+                    })
+                end
+            end
+        end
+    end
+
     -- Replace response body if any masking occurred
     if #masked_fields > 0 then
         ngx.arg[1] = cjson.encode(json_body)
@@ -426,5 +738,18 @@ function _M.log(conf, ctx)
     })
 end
 
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- Test hooks (busted only). Not part of the public plugin API.
+-- Exported here so test_mask_ner can exercise the helpers without driving
+-- the full body_filter fixture.
+-- ────────────────────────────────────────────────────────────────────────────
+_M._internal = {
+    collect_ner_candidates   = collect_ner_candidates,
+    assign_entities_to_parts = assign_entities_to_parts,
+    try_sidecar_ner          = try_sidecar_ner,
+    get_ner_breaker          = get_ner_breaker,
+    NER_DELIM                = NER_DELIM,
+}
 
 return _M

@@ -35,8 +35,20 @@ image and activated at runtime when a valid license key is present.
 ```
 
 **Communication:** gRPC over UDS (canonical, ~0.1ms RTT); HTTP/JSON over
-localhost for the Lua-to-sidecar shadow diff bridge (first-class `resty.http`
-support avoids adding a Lua gRPC dependency; same `DiffEngine` serves both paths).
+localhost for Lua-to-sidecar bridges. Bridges share an engine object with their
+gRPC counterpart so both transports produce identical output:
+
+| Bridge | gRPC entry | HTTP entry | Shared engine | Hot path |
+|--------|------------|------------|---------------|----------|
+| Shadow diff (canary) | `CanaryServiceImpl` | `DiffController` `/v1/diff` | `DiffEngine` | No (log-phase timer) |
+| NER PII detection (mask) | `MaskServiceImpl` | `MaskController` `/v1/mask/detect` | `NerDetectionService` | **Yes** (body_filter blocking) |
+
+The NER bridge carries a Resilience4j circuit breaker inside the JVM and a
+per-endpoint breaker in the Lua plugin (defense in depth). The NER pipeline
+itself is a `CompositeNerEngine` fronted by `NerEngineRegistry`, which selects
+and composes engines (OpenNLP for English, DJL+ONNX for Turkish BERT, more
+pluggable via the `NerEngine` interface) from `aria.mask.ner.engines`.
+
 **Threading:** Java 21 Virtual Threads (10K+ concurrent requests)
 **Context:** ScopedValue (not ThreadLocal) for per-request propagation
 
@@ -49,7 +61,7 @@ The Lua plugins work **standalone without the sidecar**. When the runtime is una
 | Token counting | Exact (tiktoken) | Approximate (word heuristic) | Community |
 | Shadow diff | Structural JSON diff (field paths + similarity) | Basic (status + body length + latency) | Community |
 | Prompt injection detection | Regex + vector similarity | Regex only | Enterprise |
-| PII detection | Regex + NER | Regex only | Enterprise |
+| PII detection | Regex + pluggable NER (OpenNLP EN + Turkish BERT out of the box) | Regex only | Community |
 | Content filtering | Active | Disabled | Enterprise |
 
 If the HTTP bridge is temporarily unreachable (sidecar restarting, network

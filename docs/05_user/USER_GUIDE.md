@@ -452,6 +452,83 @@ When `auto_detect.enabled` is `true`, Mask scans the response body for PII patte
 | `ip` | IPv4 addresses | Format validation |
 | `dob` | Dates of birth (YYYY-MM-DD) | Format validation |
 
+### 5.4.1 Named Entity Recognition (ML-Based PII Detection)
+
+Regex covers structural identifiers (PAN, IBAN, MSISDN, TC Kimlik). For **named entities** — personal names, locations, organizations — the Mask plugin can delegate to the Aria Runtime sidecar, which runs pluggable NER engines.
+
+**Out-of-the-box engines (ships with the sidecar):**
+
+| Engine | Language(s) | Library | Model | License |
+|--------|-------------|---------|-------|---------|
+| `opennlp` | English (default) | Apache OpenNLP | `en-ner-person.bin`, `en-ner-location.bin`, `en-ner-organization.bin` | Apache 2.0 |
+| `turkish-bert` | Turkish | DJL + ONNX Runtime | `savasy/bert-base-turkish-ner-cased` (ONNX export) | MIT |
+
+Additional engines for other languages are added by implementing the `NerEngine` interface; the registry composes them via `aria.mask.ner.engines`.
+
+**Plugin config (APISIX side):**
+
+```json
+{
+  "ner": {
+    "sidecar": {
+      "enabled": true,
+      "endpoint": "http://aria-runtime:8081",
+      "timeout_ms": 500,
+      "max_content_bytes": 131072,
+      "fail_mode": "open",
+      "min_confidence": 0.7,
+      "circuit_breaker": {
+        "failure_threshold": 5,
+        "cooldown_ms": 30000
+      },
+      "entity_strategy": {
+        "PERSON":       "redact",
+        "LOCATION":     "redact",
+        "ORGANIZATION": "mask",
+        "MISC":         "redact"
+      }
+    }
+  }
+}
+```
+
+**Sidecar config (`application.yml` / env vars):**
+
+```yaml
+aria:
+  mask:
+    ner:
+      engines: ["opennlp", "turkish-bert"]
+      min-confidence: 0.7
+      opennlp:
+        models-dir: /opt/aria/models/opennlp
+      turkish-bert:
+        model-path: /opt/aria/models/turkish-bert/model.onnx
+        tokenizer-path: /opt/aria/models/turkish-bert/tokenizer.json
+```
+
+**Hot-path semantics and failure modes:**
+
+| Condition | `fail_mode: open` (default) | `fail_mode: closed` |
+|-----------|------------------------------|---------------------|
+| Sidecar reachable, returns entities | Entities masked per `entity_strategy` | Same |
+| Sidecar timeout / 5xx / parse error | Regex-only result is returned (availability wins) | All candidate fields redacted defensively |
+| Circuit breaker open (Lua side) | Request not sent; regex-only result | All candidate fields redacted |
+| Circuit breaker open (Java side) | Sidecar returns `[]`; same as empty | Lua breaker hasn't tripped yet — regex-only result |
+
+Fail-open is the default because regex already catches high-value Turkish structural PII (TC Kimlik, MSISDN, IBAN). Healthcare, finance, and defence deployments that cannot afford an unmasked PERSON/LOCATION leaking should switch to `fail_mode: closed`.
+
+**Turkish government positioning:** OpenNLP ships English NER only. For TR-language content, enable the `turkish-bert` engine; `savasy/bert-base-turkish-ner-cased` is the most widely cited open-license TR NER checkpoint, optimised for person names and locations common in Turkish official correspondence. Model artefacts are not bundled by default — pass `-PwithTurkishNer=true` to the sidecar's `bootJar` build (or mount them as a volume) to include them.
+
+**Metrics:**
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `aria_mask_ner_calls_total` | Counter | route, result | NER call outcomes: `ok`, `error`, `parse_error`, `skipped_oversized`, `circuit_open`, `fail_closed_redacted` |
+| `aria_mask_ner_latency_ms` | Histogram | route | Round-trip time Lua → sidecar |
+| `aria_mask_ner_entities_total` | Counter | type | Entities returned and applied by category |
+| `aria_mask_ner_circuit_state` | Gauge | endpoint | 0 = closed, 1 = open, 2 = half_open |
+
 ### 5.5 Compliance Coverage
 
 | Framework | How Aria Mask Helps |
@@ -467,6 +544,10 @@ When `auto_detect.enabled` is `true`, Mask scans the response body for PII patte
 |--------|------|--------|-------------|
 | `aria_mask_applied` | Counter | field, rule, consumer, strategy | Masking operations |
 | `aria_mask_violations` | Counter | consumer, route | Auto-detected PII (not in explicit rules) |
+| `aria_mask_ner_calls_total` | Counter | route, result | NER sidecar call outcomes |
+| `aria_mask_ner_latency_ms` | Histogram | route | NER bridge round-trip time |
+| `aria_mask_ner_entities_total` | Counter | type | Entities applied (PERSON/LOCATION/ORGANIZATION/MISC) |
+| `aria_mask_ner_circuit_state` | Gauge | endpoint | Circuit breaker state (0/1/2) |
 | `aria_mask_latency_seconds` | Histogram | route | Masking processing time |
 
 ---
