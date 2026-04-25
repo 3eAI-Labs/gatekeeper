@@ -1,9 +1,39 @@
-# Release Notes — 3e-Aria-Gatekeeper v0.1.0
+# Release Notes — 3e-Aria-Gatekeeper v0.1.0 → v0.1.1
 
-**Release Date:** 2026-04-25
+**v0.1.0 Release Date:** 2026-04-25
+**v0.1.1 Patch Release Date:** 2026-04-25 (same day — closes the one remaining v0.1 critical gap)
 **License:** Apache 2.0 (Lua plugins) · community + persona-gated enterprise tiers (Java sidecar)
 **Replaces:** [`RELEASE_NOTES v1.0`](archive/RELEASE_NOTES_v1.0_2026-04-08.md) (2026-04-08), now archived
-**Driver:** Spec freeze v1.1 (`gatekeeper@a63986f`) + adversarial drift report (`PHASE_REVIEW_2026-04-25.md`) + audit-pipeline closure v1.1.1 (`aria-runtime@d487026`, ADR-009) — supersedes the 2026-04-08 release notes which contained claims that did not match shipped reality.
+**Driver:** Spec freeze v1.1 (`gatekeeper@a63986f`) + adversarial drift report (`PHASE_REVIEW_2026-04-25.md`) + audit-pipeline closure v1.1.1 (`aria-runtime@d487026`, ADR-009) + **Flyway closure v1.1.2 (`aria-runtime@9bd22d5`) for v0.1.1** — supersedes the 2026-04-08 release notes which contained claims that did not match shipped reality.
+
+---
+
+## v0.1.1 Patch (2026-04-25 evening)
+
+**One change vs v0.1.0:** sidecar now bootstraps the database schema at startup via Flyway. Closes FINDING-005 (the one remaining v0.1 critical gap).
+
+**Implementation in `aria-runtime@9bd22d5`:**
+- `build.gradle.kts`: +`flyway-core`, +`flyway-database-postgresql`, +`postgresql` (JDBC driver)
+- `application.yml`: `spring.flyway.*` configured against the existing `aria.postgres.*` coordinates; `baseline-on-migrate=true` for safe deploys against pre-migrated DBs; disable via `ARIA_FLYWAY_ENABLED=false` for environments managing migrations externally
+- `src/main/resources/db/migration/`: V001/V002/V003 SQL vendored from `gatekeeper/db/migration/` (byte-identical, Flyway checksum-validated; v0.2 may consolidate)
+
+**Operator impact:**
+- ✅ docker-compose dev users: schema bootstraps automatically; no more "run flyway manually" prerequisite
+- ✅ Helm users: optional — sidecar self-bootstraps; Helm migration Job remains for split-permission deployments where the sidecar lacks DDL grants
+- ✅ Existing deployments: `baseline-on-migrate=true` makes upgrade-in-place safe; Flyway recognises the already-migrated state
+
+**R2DBC coexistence:** Runtime queries (`PostgresClient`, `AuditFlusher`) continue through R2DBC (async). The JDBC driver is included only for Flyway use; Flyway closes its connection after migrating, no JDBC pool persists at runtime.
+
+**Outstanding gaps after v0.1.1:**
+- 0 critical
+- 4 minor (ariactl deferred, PromptAnalyzer/ContentFilter stubs, Karar B token role semantics open, reversible tokenisation deferred)
+- 3 nice-to-haves deferred (WASM, coverage/SAST re-run, latency-guard simplification)
+
+See `Known Limitations` below for details — §1 (audit pipeline) closed in v1.1.1; §2 (Flyway) closed in v1.1.2; §3-§9 unchanged from v0.1.0.
+
+---
+
+## v0.1.0 (the original release notes content follows)
 
 ---
 
@@ -189,15 +219,17 @@ This was tracked as a critical v0.1 gap in earlier drafts of this document. **It
 
 **Deferred to v0.3:** dead-letter queue for poison messages; longer Redis buffer TTL; backpressure on producer; sub-second visibility (current default is 5s flush interval, configurable down to ~250ms).
 
-### 🔴 2. DB migrations not auto-bootstrapped by sidecar (FINDING-005)
+### ✅ 2. DB migrations auto-bootstrapped by sidecar (FINDING-005) — CLOSED in v1.1.2 (`aria-runtime@9bd22d5`)
 
-Migration SQL files (`V001..V003`) exist in `db/migration/` and are correct (verified consistent with DB_SCHEMA.md DDL). The Helm chart includes a one-shot Flyway Job that runs them before the sidecar Deployment is rolled. **But the sidecar JAR does not include a Flyway runner** — `aria-runtime/build.gradle.kts` has no Flyway dependency and `application.yml` has no `spring.flyway.*` config.
+This was the one remaining critical v0.1 gap after the v1.1.1 audit-pipeline closure. **It was closed end-to-end** in `aria-runtime@9bd22d5` (same-day after v1.1.1).
 
-**Net effect:** docker-compose dev users must apply migrations manually; Helm users get them via the migration Job. Sidecar starts successfully without the tables existing; on missing `audit_events` table the v1.1.1 `AuditFlusher` will increment `failedTotal` and ERROR-log on every drained event — surfacing the gap rather than silencing it. (This is a deliberate change vs the pre-v1.1.1 silent-drop behaviour.)
+**Implementation:** `build.gradle.kts` declares `flyway-core` + `flyway-database-postgresql` + `postgresql` (JDBC); `application.yml` configures `spring.flyway.*` with the same `aria.postgres.*` coordinates as the R2DBC client. `baseline-on-migrate=true` allows fresh deploys against an already-migrated DB; `validate-on-migrate=true` catches checksum drift. Disable via `ARIA_FLYWAY_ENABLED=false` for environments managing migrations externally (e.g., split-permission DDL deployments where the sidecar role lacks DDL grants — those keep the Helm migration Job).
 
-**Operator workaround for v0.1:** Always run the Helm migration Job before bringing up the sidecar; for docker-compose, run `flyway/flyway:10-alpine migrate` once against the dev Postgres before `compose up`.
+**R2DBC coexistence:** Runtime queries (`PostgresClient`, `AuditFlusher`) continue through R2DBC (async). The JDBC driver is included solely for Flyway; Flyway closes its connection after migrating — no JDBC pool persists at runtime.
 
-**v0.2 fix:** Add Flyway dependency + `spring.flyway.locations: classpath:db/migration` to `build.gradle.kts` and `application.yml`. Sidecar will apply migrations idempotently at startup.
+**Migration source-of-truth (v0.1.1):** V001..V003 SQL files now live in two locations (gatekeeper/db/migration/ + aria-runtime/src/main/resources/db/migration/), byte-identical, Flyway checksum-validated. v0.2 candidate: consolidate to aria-runtime only and retire the Helm migration Job entirely.
+
+**Status:** docker-compose dev users no longer need to apply migrations manually; Helm users may disable the migration Job for typical (non-split-permission) deployments; existing deployments upgrade in place safely thanks to `baseline-on-migrate=true`.
 
 ### 🟡 3. ariactl CLI deferred to v0.2 (FINDING-001)
 
@@ -272,14 +304,17 @@ For full audit trail, see [`PHASE_REVIEW_2026-04-25.md`](PHASE_REVIEW_2026-04-25
 
 ## See also
 
-- [`HLD.md`](../03_architecture/HLD.md) v1.1 — High-Level Design
-- [`LLD.md`](../04_design/LLD.md) v1.1.1 — Low-Level Design (audit pipeline closure update)
+- [`HLD.md`](../03_architecture/HLD.md) v1.1.1 — High-Level Design
+- [`LLD.md`](../04_design/LLD.md) v1.1.1 — Low-Level Design (audit pipeline closure)
 - [`API_CONTRACTS.md`](../03_architecture/API_CONTRACTS.md) v1.1 — REST + HTTP bridge + gRPC + plugin schemas
 - [`ERROR_CODES.md`](../04_design/ERROR_CODES.md) v1.1.1 — 84 ARIA error codes (`ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` retired)
+- [`DB_SCHEMA.md`](../04_design/DB_SCHEMA.md) v1.1.2 — Schema + migration pipeline status (Flyway in sidecar)
 - [`ADR-008`](../03_architecture/ADR/ADR-008-http-bridge-over-grpc.md) — HTTP-bridge supersedes gRPC-UDS for Lua transport
 - [`ADR-009`](../03_architecture/ADR/ADR-009-audit-flusher-lpop-polling.md) — Audit pipeline uses LPOP polling, not HTTP bridge (closes FINDING-003)
 - [`PHASE_REVIEW_2026-04-25.md`](PHASE_REVIEW_2026-04-25.md) — adversarial drift report (15 findings) driving this release
-- [`CODE_REVIEW_REPORT_2026-04-25.md`](CODE_REVIEW_REPORT_2026-04-25.md) v1.1.1 — code review post-spec-freeze v1.1.1 (audit-pipeline closure update)
+- [`CODE_REVIEW_REPORT_2026-04-25.md`](CODE_REVIEW_REPORT_2026-04-25.md) v1.1.2 — code review post-spec-freeze (audit + Flyway closures)
+- [`HUMAN_SIGN_OFF_v0.1.0.md`](HUMAN_SIGN_OFF_v0.1.0.md) — v0.1.0 sign-off
+- [`HUMAN_SIGN_OFF_v0.1.1.md`](HUMAN_SIGN_OFF_v0.1.1.md) — v0.1.1 sign-off
 - [`archive/RELEASE_NOTES_v1.0_2026-04-08.md`](archive/RELEASE_NOTES_v1.0_2026-04-08.md) — historical baseline (claims now corrected)
 
 ---

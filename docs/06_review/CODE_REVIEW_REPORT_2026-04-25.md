@@ -1,25 +1,26 @@
-# Code Review Report — 3e-Aria-Gatekeeper (post-spec-freeze v1.1.1)
+# Code Review Report — 3e-Aria-Gatekeeper (post-spec-freeze v1.1.2)
 
 **Phase:** 6 — Review & DevOps
-**Date:** 2026-04-25 (v1.1.1 audit-pipeline closure update)
+**Date:** 2026-04-25 (v1.1.2 Flyway closure update)
 **Reviewer:** AI Reviewer (pending human final review)
 **Replaces:** [`CODE_REVIEW_REPORT v1.0`](archive/CODE_REVIEW_REPORT_v1.0_2026-04-08.md) (2026-04-08), now archived
-**Scope:** All code as of `gatekeeper@<v1.1.1-commit>` and `aria-runtime@d487026` (HLD v1.1 + LLD v1.1.1 + ADR-009; 7+ Lua test files, 17+ Java test files, 128 JUnit tests; 84 ARIA error codes)
-**Driver:** Spec freeze v1.1 (commit `a63986f`) reconciled artefacts with shipped code; v1.1.1 closes FINDING-003 (audit pipeline) following `aria-runtime@d487026`. This report verifies post-freeze code health honestly. Replaces the v1.0 report which gave PASS to claims that were either false or stale by 2026-04-25.
+**Scope:** All code as of `gatekeeper@<v1.1.2-commit>` and `aria-runtime@9bd22d5` (HLD v1.1.1 + LLD v1.1.1 + DB_SCHEMA v1.1.2 + ADR-009; 7+ Lua test files, 17+ Java test files, 128 JUnit tests; 84 ARIA error codes)
+**Driver:** Spec freeze v1.1 (commit `a63986f`) reconciled artefacts with shipped code; v1.1.1 closed FINDING-003 (audit pipeline) following `aria-runtime@d487026`; **v1.1.2 closes FINDING-005 (DB migrations) following `aria-runtime@9bd22d5`** — sidecar now bootstraps schema via Flyway at startup. This report verifies post-freeze code health honestly. Replaces the v1.0 report which gave PASS to claims that were either false or stale by 2026-04-25.
 
 ---
 
 ## 0. Verdict
 
-**CONDITIONAL PASS — merge to v0.1.0 OK with explicit acknowledgment of v0.1 limitations (§10).**
+**PASS — release v0.1.1 ready, with the one remaining minor gap acknowledged.**
 
-The shipped community-tier code is production-quality for an open-core public release. Two honest gaps must be acknowledged at release time and tracked into v0.2:
-- 🔴 DB migrations require Helm Job; sidecar does not auto-bootstrap them (FINDING-005)
+The shipped community-tier code is production-quality for an open-core public release. **Both critical v0.1 gaps are now closed.** The single remaining minor gap is explicitly acknowledged at release time and tracked into v0.2:
 - 🟡 ariactl CLI not built (deferred to v0.2 — FINDING-001)
 
-**FINDING-003 (audit pipeline) was closed in v1.1.1** via `aria-runtime@d487026` (`audit/AuditFlusher` Spring `@Scheduled` LPOP drain — see ADR-009). It is no longer carried as a v0.1 gap.
+**FINDING-003 (audit pipeline) was closed in v1.1.1** via `aria-runtime@d487026` (`audit/AuditFlusher` Spring `@Scheduled` LPOP drain — see ADR-009).
 
-These are documented as v0.1 known limitations in §10 and in `RELEASE_NOTES_v0.1.0_2026-04-25.md`, not papered over with PASS labels.
+**FINDING-005 (DB migrations not auto-bootstrapped in sidecar) was closed in v1.1.2** via `aria-runtime@9bd22d5` (Flyway dependency + `spring.flyway.*` config; V001..V003 vendored into sidecar classpath). Schema bootstraps idempotently at sidecar startup.
+
+Other minor stubs/deferred items remain documented in §10 as v0.2/v0.3 work. None block the v0.1.1 release.
 
 ---
 
@@ -165,10 +166,13 @@ These are honest acknowledgments. Each must appear in `RELEASE_NOTES_v0.1.0_2026
 - **Deferred to v0.3:** dead-letter queue for poison messages; longer Redis buffer TTL; backpressure on producer.
 - **Test coverage:** 7 new tests in `AuditFlusherTest.java`; suite count 121 → 128, all green.
 
-### 🔴 2. DB migrations not auto-bootstrapped (FINDING-005)
-- **What:** `db/migration/V001..V003.sql` files exist and are correct. Helm chart ships `migration-job.yaml` (Flyway one-shot Job). But `aria-runtime/src/main/resources/` contains only `application.yml` — no Flyway dependency, no `spring.flyway.*` config.
-- **Net effect:** docker-compose dev users must apply migrations manually; Helm users get them via the Job. Sidecar starts successfully without the tables existing; on missing `audit_events` table, `AuditFlusher` (v1.1.1) will increment `failedTotal` and ERROR-log on every drained event — surfacing the gap, not silencing it.
-- **v0.2 fix:** Add Flyway dependency + `spring.flyway.locations` to `build.gradle.kts` and `application.yml`. Sidecar applies migrations idempotently at startup.
+### ✅ 2. DB migrations auto-bootstrapped via Flyway (FINDING-005) — CLOSED 2026-04-25
+- **Status:** Closed in `aria-runtime@9bd22d5` (same-day after this report's first draft). No longer a v0.1 gap.
+- **Implementation:** `build.gradle.kts` declares `flyway-core` + `flyway-database-postgresql` + `postgresql` JDBC; `application.yml` configures `spring.flyway.*` using the same `aria.postgres.*` coordinates as the R2DBC runtime client. `baseline-on-migrate=true` allows fresh deploys against an already-migrated DB; `validate-on-migrate=true` catches checksum drift. Disable via `ARIA_FLYWAY_ENABLED=false` for environments managing migrations externally (e.g., split-permission DDL deployments).
+- **R2DBC coexistence:** Runtime queries (`PostgresClient`, `AuditFlusher`) continue through R2DBC (async). The JDBC driver is included solely for Flyway use; Flyway closes its connection after migrating, no JDBC pool persists at runtime.
+- **Migration source-of-truth:** V001..V003 files now live in two locations (gatekeeper/db/migration/ + aria-runtime/src/main/resources/db/migration/), byte-identical, Flyway checksum-validated. v0.2 candidate: consolidate to aria-runtime only and retire the Helm migration Job.
+- **Helm migration Job:** Still present, useful for split-permission deployments where the sidecar's DB role lacks DDL grants. May be disabled for typical deployments where the sidecar handles its own migrations.
+- **Test coverage:** Zero new tests required — Flyway is exercised by sidecar startup, not by unit tests. All 128 existing tests pass with Flyway on the classpath.
 
 ### 🟡 3. ariactl CLI deferred (FINDING-001)
 - **What:** HLD §3.5 originally promised 7-command Go CLI; not built in v0.1.
@@ -218,7 +222,7 @@ The 2026-04-08 report's PASS verdicts that no longer hold (corrected here, archi
 
 | Category | Result |
 |---|---|
-| Spec compliance (post-freeze v1.1.1) | PASS |
+| Spec compliance (post-freeze v1.1.2) | PASS |
 | Architecture | PASS |
 | Code quality | PASS |
 | Security | PASS |
@@ -227,12 +231,12 @@ The 2026-04-08 report's PASS verdicts that no longer hold (corrected here, archi
 | Testing | PASS *coverage re-run deferred* |
 | Observability | PASS |
 | AI code review | PASS |
-| **Honest known gaps** | 1 critical + 4 minor — see §10 (FINDING-003 closed in v1.1.1) |
+| **Honest known gaps** | 0 critical + 4 minor — see §10 (FINDING-003 closed in v1.1.1; FINDING-005 closed in v1.1.2) |
 
-**Recommendation:** APPROVE for v0.1.0 release **with explicit human signature** confirming awareness of §10 gaps. The 2026-04-08 process failure (signed-off-as-PASS without human review) must NOT recur. See `GUIDELINES_MANIFEST.yaml` `phase_gates.require_human_signature` for the lock.
+**Recommendation:** APPROVE for v0.1.1 release **with explicit human signature** confirming awareness of §10 gaps. With both critical v0.1 gaps now closed (FINDING-003 in v1.1.1, FINDING-005 in v1.1.2), this is an unconditional PASS for the community tier. The 2026-04-08 process failure (signed-off-as-PASS without human review) must NOT recur. See `GUIDELINES_MANIFEST.yaml` `phase_gates.require_human_signature` for the lock.
 
 ---
 
-*Report Version: 1.1.1 | Created: 2026-04-25 | Revised: 2026-04-25 (audit-pipeline closure)*
-*Driver: PHASE_REVIEW_2026-04-25.md (15 findings) + spec freeze commit `a63986f` + audit closure `aria-runtime@d487026` + ADR-009*
+*Report Version: 1.1.2 | Created: 2026-04-25 | Revised: 2026-04-25 (audit-pipeline closure, then Flyway closure)*
+*Driver: PHASE_REVIEW_2026-04-25.md (15 findings) + spec freeze commit `a63986f` + audit closure `aria-runtime@d487026` + ADR-009 + Flyway closure `aria-runtime@9bd22d5`*
 *Status: AI Review Complete — **Human Final Review REQUIRED before merge**. Do not silently treat as approval.*

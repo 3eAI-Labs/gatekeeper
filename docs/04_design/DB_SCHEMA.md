@@ -2,12 +2,13 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 4 — Low-Level Design
-**Version:** 1.1.1
-**Date:** 2026-04-25 (v1.1.1 audit-pipeline closure); 2026-04-25 (v1.1 spec freeze); 2026-04-08 (v1.0 baseline)
+**Version:** 1.1.2
+**Date:** 2026-04-25 (v1.1.2 Flyway closure); 2026-04-25 (v1.1.1 audit-pipeline closure); 2026-04-25 (v1.1 spec freeze); 2026-04-08 (v1.0 baseline)
 **Author:** AI Architect + Human Oversight
 **Input:** HLD.md v1.1.1
 **v1.1 Driver:** PHASE_REVIEW_2026-04-25 FINDING-005 — DDL is correct and matches the Flyway migrations in `db/migration/V001..V003.sql`, but the sidecar has no Flyway runner wired (auto-bootstrap missing); see §1.2.
-**v1.1.1 Driver:** §1.2 audit-pipeline status row updated — FINDING-003 closed in `aria-runtime@d487026` (`audit/AuditFlusher`, ADR-009). v0.2 fix item §2 retired; remaining v0.2 fix is §1 (Flyway in sidecar) and §3 (table-presence readiness check).
+**v1.1.1 Driver:** §1.2 audit-pipeline status row updated — FINDING-003 closed in `aria-runtime@d487026` (`audit/AuditFlusher`, ADR-009). v0.2 fix item §2 retired.
+**v1.1.2 Driver:** **FINDING-005 closed** in `aria-runtime@9bd22d5` — Flyway dependency + `spring.flyway.*` config added; V001..V003 migrations vendored into sidecar classpath. §1.2 sidecar-Flyway row flipped ❌ → ✅; v0.2 fix item §1 retired. The migration Job in the Helm chart remains for environments that pre-migrate (e.g., locked-down DBs where the sidecar lacks DDL grants).
 
 ---
 
@@ -26,15 +27,19 @@ PostgreSQL holds append-only audit tables partitioned by month. The Java sidecar
 
 **Migration files:** `db/migration/V001__create_schema_and_enums.sql`, `V002__create_billing_and_masking_tables.sql`, `V003__create_partitions_and_maintenance.sql` — present in this repo and consistent with the DDL specified in §3 below.
 
-**Migration execution path in v0.1:**
-- ✅ Helm chart ships `runtime/helm/aria-gatekeeper/templates/migration-job.yaml` — a Flyway one-shot Job that runs the V001..V003 SQL files against the configured Postgres before the sidecar Deployment is rolled.
-- ❌ **Sidecar (`aria-runtime`) does NOT include a Flyway runner.** The `application.yml` does not declare `spring.flyway.*`, no Flyway dependency is in `build.gradle.kts`. If the Helm migration Job is skipped (e.g., docker-compose dev), the destination tables do not exist.
-- ✅ **Audit pipeline downstream of the migration is closed (v1.1.1).** `audit/AuditFlusher` Spring `@Scheduled` LPOP drain (ADR-009) consumes `aria:audit_buffer` and persists to `audit_events`. If the migration is skipped and the table does not exist, `AuditFlusher.failedTotal` increments + ERROR-logs on every drained event — surfacing the missing-table gap rather than silently dropping events as before.
+**Migration execution path in v0.1.1:**
+- ✅ **Sidecar (`aria-runtime`) bootstraps schema at startup via Flyway (v1.1.2 closure).** `build.gradle.kts` declares `flyway-core` + `flyway-database-postgresql` + `postgresql` (JDBC); `application.yml` configures `spring.flyway.*` to use the same `aria.postgres.*` coordinates as R2DBC. `baseline-on-migrate=true` allows fresh deploys against an already-migrated DB. Disable via `ARIA_FLYWAY_ENABLED=false` if migrations are externally managed.
+- ✅ Helm chart still ships `runtime/helm/aria-gatekeeper/templates/migration-job.yaml` — useful when the DB role granted to the sidecar lacks DDL privileges (split-permission deployments where the migration Job runs as an elevated role and the sidecar runs as DML-only). For typical deployments where the sidecar has DDL grants, the Job becomes redundant and may be disabled.
+- ✅ **Audit pipeline downstream of the migration is closed (v1.1.1).** `audit/AuditFlusher` Spring `@Scheduled` LPOP drain (ADR-009) consumes `aria:audit_buffer` and persists to `audit_events`. With v1.1.2's Flyway bootstrap the destination table now exists on first sidecar start.
 
-**v0.2 fix items (tracked):**
-1. Add Flyway dependency + `spring.flyway.locations` config to `aria-runtime/build.gradle.kts` and `application.yml` so sidecar startup applies migrations idempotently. *(Closes the dev-stack gap.)*
-2. ✅ **Done in v1.1.1** — `audit/AuditFlusher` Spring `@Scheduled` LPOP drain implemented per ADR-009 (Karar A chosen over the `POST /v1/audit/event` HTTP bridge alternative); Redis-buffered audit events now reach `audit_events`.
-3. Add a sidecar startup readiness check that verifies `audit_events` table presence; sidecar should fail readiness if the table is missing. (Current `AuditFlusher` ERROR-logs on missing table — but readiness probe still reports OK; tightening this is the v0.2 task.)
+**Migration source-of-truth (v0.1.1):**
+The V001..V003 SQL files live in **two locations**: `gatekeeper/db/migration/` (used by the Helm migration Job) and `aria-runtime/src/main/resources/db/migration/` (vendored into the sidecar JAR for Flyway classpath discovery). Both copies are byte-identical; Flyway's checksum validation will surface any drift between them. v0.2 candidate consolidation: retire the gatekeeper copy + Helm migration Job entirely once split-permission deployments are confirmed unused.
+
+**Remaining v0.2 fix items:**
+1. ✅ **Done in v1.1.2** — Flyway bootstrap in sidecar (`aria-runtime@9bd22d5`).
+2. ✅ **Done in v1.1.1** — `audit/AuditFlusher` Spring `@Scheduled` LPOP drain implemented per ADR-009.
+3. Add a sidecar startup readiness check that verifies `audit_events` table presence; sidecar should fail readiness if the table is missing. (With v1.1.2 Flyway bootstrap this is mostly defence-in-depth — Flyway will fail loudly at startup if it cannot reach the DB or migrate, but a runtime readiness check still adds value if the DB is dropped post-startup.)
+4. Consolidate the two migration source-of-truth copies (see "Migration source-of-truth" above).
 
 ### 1.1 Schema Name
 
@@ -800,8 +805,9 @@ The three tables are independent -- no foreign key relationships exist between t
 
 ---
 
-*Document Version: 1.1.1 | Created: 2026-04-08 | Revised: 2026-04-25 (v1.1 spec freeze, then v1.1.1 audit-pipeline closure)*
+*Document Version: 1.1.2 | Created: 2026-04-08 | Revised: 2026-04-25 (v1.1 spec freeze, v1.1.1 audit-pipeline closure, v1.1.2 Flyway closure)*
 *Change log v1.0 → v1.1: §1.2 NEW — migration pipeline status (FINDING-005); DDL itself unchanged.*
 *Change log v1.1 → v1.1.1: §1.2 audit-pipeline downstream row flipped to ✅ closed (`audit/AuditFlusher`, ADR-009); v0.2 fix item §2 retired (done in v1.1.1).*
+*Change log v1.1.1 → v1.1.2: §1.2 sidecar-Flyway row flipped ❌ → ✅ (closed in `aria-runtime@9bd22d5` — `flyway-core` + `flyway-database-postgresql` + `postgresql` JDBC + `spring.flyway.*` config). v0.2 fix item §1 retired. Migration source-of-truth note added (gatekeeper/db/migration + aria-runtime/src/main/resources/db/migration coexist; v0.2 candidate consolidation). Helm migration Job remains for split-permission deployments.*
 *Phase: 4 — Low-Level Design*
 *Status: Draft*
