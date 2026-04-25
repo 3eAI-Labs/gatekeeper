@@ -1,0 +1,228 @@
+3e-Aria-Gatekeeper
+Copyright 2026 3eAI Labs Ltd
+
+This product includes software developed by 3eAI Labs Ltd
+(https://3eailabs.com/).
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this product except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+================================================================================
+THIRD-PARTY ATTRIBUTIONS
+================================================================================
+
+This product includes or depends on the following third-party software.
+Each component is licensed under its own terms; the inclusion of these
+notices does not modify those licences.
+
+--------------------------------------------------------------------------------
+Apache APISIX
+--------------------------------------------------------------------------------
+Copyright The Apache Software Foundation
+Licence: Apache License 2.0
+URL:     https://apisix.apache.org/
+
+3e-Aria-Gatekeeper plugins are loaded into Apache APISIX as standard
+plugin modules; APISIX itself is not bundled with this distribution.
+
+--------------------------------------------------------------------------------
+jtokkit
+--------------------------------------------------------------------------------
+Copyright Knuddels GmbH & Co. KG
+Licence: MIT License
+URL:     https://github.com/knuddelsgmbh/jtokkit
+
+The aria-runtime sidecar uses jtokkit for OpenAI tiktoken-compatible
+token counting (TokenEncoder; BR-SH-006).
+
+--------------------------------------------------------------------------------
+Apache OpenNLP
+--------------------------------------------------------------------------------
+Copyright The Apache Software Foundation
+Licence: Apache License 2.0
+URL:     https://opennlp.apache.org/
+
+The aria-runtime sidecar uses OpenNLP for English named-entity
+recognition (OpenNlpNerEngine; BR-MK-006). NER models for the
+PERSON / LOCATION / ORGANIZATION classes are operator-supplied;
+see runtime/docs/NER_MODELS.md.
+
+--------------------------------------------------------------------------------
+Deep Java Library (DJL)
+--------------------------------------------------------------------------------
+Copyright Amazon.com, Inc. or its affiliates
+Licence: Apache License 2.0
+URL:     https://djl.ai/
+
+The aria-runtime sidecar uses DJL + DJL HuggingFace tokenizers for
+multilingual NER inference via ONNX runtime (DjlHuggingFaceNerEngine;
+BR-MK-006). Default Turkish-BERT model 'savasy/bert-base-turkish-ner-cased'
+is operator-supplied (slim image) or enterprise-DPO bundled.
+
+--------------------------------------------------------------------------------
+ONNX Runtime
+--------------------------------------------------------------------------------
+Copyright Microsoft Corporation
+Licence: MIT License
+URL:     https://onnxruntime.ai/
+
+The aria-runtime sidecar uses ONNX Runtime via DJL for ML model
+inference (NER pipeline).
+
+--------------------------------------------------------------------------------
+Resilience4j
+--------------------------------------------------------------------------------
+Copyright Robert Winkler and contributors
+Licence: Apache License 2.0
+URL:     https://resilience4j.readme.io/
+
+The aria-runtime sidecar uses Resilience4j for the inner JVM-side
+circuit breaker on NER inference calls. Defense-in-depth pairing with
+the Lua-side aria-circuit-breaker (apisix/plugins/lib/aria-circuit-breaker.lua).
+
+--------------------------------------------------------------------------------
+Lettuce
+--------------------------------------------------------------------------------
+Copyright the Lettuce contributors
+Licence: Apache License 2.0
+URL:     https://lettuce.io/
+
+The aria-runtime sidecar uses Lettuce for asynchronous Redis access
+(AriaRedisClient; consumed by AuditFlusher's LPOP drain per ADR-009
+and by quota / circuit-breaker state queries).
+
+--------------------------------------------------------------------------------
+R2DBC PostgreSQL
+--------------------------------------------------------------------------------
+Copyright the R2DBC contributors
+Licence: Apache License 2.0
+URL:     https://r2dbc.io/
+
+The aria-runtime sidecar uses R2DBC for asynchronous PostgreSQL access
+(PostgresClient.insertAuditEvent / insertBillingRecord). The synchronous
+PostgreSQL JDBC driver (org.postgresql:postgresql) is also included
+solely for Flyway migration use (closes FINDING-005); JDBC is not used
+for runtime queries.
+
+--------------------------------------------------------------------------------
+Flyway
+--------------------------------------------------------------------------------
+Copyright Redgate Software Ltd (Flyway by Redgate)
+Licence: Apache License 2.0
+URL:     https://flywaydb.org/
+
+The aria-runtime sidecar uses Flyway core + Flyway PostgreSQL module
+to bootstrap database schema at startup (V001..V003 migrations).
+
+--------------------------------------------------------------------------------
+Spring Boot
+--------------------------------------------------------------------------------
+Copyright Pivotal Software, Inc. / Broadcom Inc.
+Licence: Apache License 2.0
+URL:     https://spring.io/projects/spring-boot
+
+The aria-runtime sidecar is a Spring Boot application using Spring
+Web (HTTP bridges per ADR-008), Spring Actuator (health + metrics),
+and Spring Scheduling (AuditFlusher).
+
+--------------------------------------------------------------------------------
+gRPC Java
+--------------------------------------------------------------------------------
+Copyright The gRPC Authors
+Licence: Apache License 2.0
+URL:     https://grpc.io/
+
+The aria-runtime sidecar exposes gRPC services as forward-compat for
+non-Lua callers (ADR-008 Decision §3); the Lua plugins do not use the
+gRPC path.
+
+--------------------------------------------------------------------------------
+Protobuf
+--------------------------------------------------------------------------------
+Copyright Google Inc.
+Licence: BSD 3-Clause License
+URL:     https://protobuf.dev/
+
+Used by the gRPC Java services in the aria-runtime sidecar.
+
+--------------------------------------------------------------------------------
+Netty
+--------------------------------------------------------------------------------
+Copyright The Netty Project
+Licence: Apache License 2.0
+URL:     https://netty.io/
+
+Used transitively by gRPC Java (netty-shaded transport).
+
+--------------------------------------------------------------------------------
+Jackson
+--------------------------------------------------------------------------------
+Copyright FasterXML, LLC
+Licence: Apache License 2.0
+URL:     https://github.com/FasterXML/jackson
+
+Used by the aria-runtime sidecar for JSON serialisation in HTTP bridge
+endpoints and for Lua audit event JSON parsing in AuditFlusher.
+
+--------------------------------------------------------------------------------
+JUnit Jupiter + Mockito + AssertJ
+--------------------------------------------------------------------------------
+JUnit  © The JUnit Team — Eclipse Public License 2.0
+Mockito © Mockito contributors — MIT License
+AssertJ © AssertJ contributors — Apache License 2.0
+
+Test-time dependencies for aria-runtime; not shipped in production
+distributions.
+
+--------------------------------------------------------------------------------
+busted (Lua test framework)
+--------------------------------------------------------------------------------
+Copyright Olivine Labs / Caleb Maclennan and contributors
+Licence: MIT License
+URL:     https://lunarmodules.github.io/busted/
+
+Test-time dependency for the Lua plugins; not shipped in production
+distributions.
+
+================================================================================
+NER MODEL ATTRIBUTIONS (operator-supplied, NOT bundled in slim image)
+================================================================================
+
+The following NER model artefacts are NOT distributed with the
+3e-Aria-Gatekeeper community-tier image. Operators retrieve them
+separately per runtime/docs/NER_MODELS.md, or receive them bundled
+in the enterprise DPO tier under a separate licensing arrangement.
+
+--------------------------------------------------------------------------------
+savasy/bert-base-turkish-ner-cased
+--------------------------------------------------------------------------------
+Copyright Savaş Yıldırım
+Licence: MIT License (per model card on Hugging Face)
+URL:     https://huggingface.co/savasy/bert-base-turkish-ner-cased
+
+Default Turkish NER model loaded by DjlHuggingFaceNerEngine.
+
+--------------------------------------------------------------------------------
+OpenNLP English NER models (en-ner-*)
+--------------------------------------------------------------------------------
+Copyright The Apache Software Foundation
+Licence: Apache License 2.0 (per Apache OpenNLP model distribution)
+URL:     https://opennlp.apache.org/models.html
+
+English PER / LOC / ORG NER models loaded by OpenNlpNerEngine.
+
+================================================================================
+END OF NOTICES
+================================================================================
+
+Reports of inaccuracies in attribution are welcomed via the security
+disclosure channel (security@3eai-labs.com) or as a standard PR.
