@@ -2,9 +2,29 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 2 — Business Analysis
-**Version:** 1.0
-**Date:** 2026-04-08
-**Source:** BUSINESS_LOGIC.md v1.0, DECISION_MATRIX.md v1.0
+**Version:** 1.1.3
+**Date:** 2026-04-25 (v1.1.3 spec-coherence sweep); 2026-04-08 (v1.0 baseline)
+**Source:** BUSINESS_LOGIC.md v1.1.3, DECISION_MATRIX.md v1.0
+**v1.1.3 Driver:** This Phase 2 document is the *business-rule-driven exception taxonomy* (what each business rule says should fail, and how). The *implementation registry* of every code emitted by shipped code lives in [`docs/04_design/ERROR_CODES.md`](../04_design/ERROR_CODES.md) v1.1.1 — currently 84 codes. v1.0 of this Phase 2 doc had 46 codes; the post-v1.0 ship rounds (NER bridge BR-MK-006, shadow diff BR-CN-007, transport reframe per ADR-008, audit closure per ADR-009) added codes that this Phase 2 doc had not been updated to reflect. The v1.1.3 sweep below adds the new code families with business-rule mappings; the canonical implementation registry remains Phase 4 ERROR_CODES.md.
+
+> **For implementers and operators:** [`docs/04_design/ERROR_CODES.md`](../04_design/ERROR_CODES.md) v1.1.1 is the **canonical** registry — full HTTP/gRPC mapping, severity, retry strategy, and traceability to business rules + user stories for all 84 codes. Use that document for emit decisions and operator alerting; this Phase 2 document explains *why* each code exists in business terms.
+
+### Post-v1.0 additions (since 2026-04-08)
+
+| Code | Business Rule | Origin (Phase 4 §) | Notes |
+|---|---|---|---|
+| `ARIA_MK_NER_SIDECAR_UNAVAILABLE` | BR-MK-006 | §3.2 | NER bridge unreachable; per `fail_mode` returns regex-only result OR redacts candidates |
+| `ARIA_MK_NER_FAIL_CLOSED_REDACTED` | BR-MK-006 | §3.2 | Defensive fail-mode applied — operator informed that NER could not verify candidates |
+| `ARIA_MK_NER_CIRCUIT_OPEN` | BR-MK-006 | §3.2 | Lua-side circuit breaker (`aria-circuit-breaker.lua`) tripped — call short-circuited |
+| `ARIA_CN_SHADOW_DIFF_UNAVAILABLE` | BR-CN-007 | §3.3 | Diff bridge unreachable; shadow comparison skipped (no impact on baseline response) |
+| `ARIA_CN_SHADOW_BRIDGE_TIMEOUT` | BR-CN-007 | §3.3 | Diff bridge exceeded deadline; shadow diff skipped this request |
+| `ARIA_RT_TOKENIZER_FALLBACK` | BR-SH-006 | §3.4 | Karar A: model unknown to jtokkit registry; fallback to `cl100k_base` with `Accuracy.FALLBACK` flag (informational, not request-failing) |
+
+### Retired in v1.1.1
+
+| Code | Reason |
+|---|---|
+| `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` | Was registered in v1.1 spec freeze as a v0.1 gap marker for FINDING-003. Audit pipeline was closed in `aria-runtime@d487026` per ADR-009; code retired per Karar A (Retire). Operators monitor audit health via `AuditFlusher.persistedTotal` / `failedTotal` Prometheus counters. |
 
 ---
 
@@ -249,6 +269,7 @@ Every exception code maps to a Prometheus metric for monitoring.
 
 ---
 
-*Document Version: 1.0 | Created: 2026-04-08*
-*Source: BUSINESS_LOGIC.md v1.0, DECISION_MATRIX.md v1.0*
-*Status: Draft — Pending Human Approval*
+*Document Version: 1.1.3 | Created: 2026-04-08 | Revised: 2026-04-25 (v1.1.3 spec-coherence sweep)*
+*Source: BUSINESS_LOGIC.md v1.1.3, DECISION_MATRIX.md v1.0*
+*Status: v1.1.3 Draft — Pending Human Approval (part of doc-set audit Wave 3)*
+*Change log v1.0 → v1.1.3: Header reframes this Phase 2 doc as the business-rule-driven taxonomy with Phase 4 ERROR_CODES.md v1.1.1 as the canonical implementation registry (single source of truth for 84 codes). Added "Post-v1.0 additions" table covering 6 new codes (3 NER bridge per BR-MK-006, 2 shadow diff per BR-CN-007, 1 tokenizer fallback per Karar A). Added "Retired in v1.1.1" entry for `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` (FINDING-003 closure, ADR-009). Underlying §3 catalog rows from v1.0 baseline are intact and remain valid for the original 46 BR-driven codes.*

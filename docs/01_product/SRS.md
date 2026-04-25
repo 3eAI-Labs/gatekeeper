@@ -2,10 +2,11 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 1 — Requirements
-**Version:** 1.0
-**Date:** 2026-04-08
+**Version:** 1.1.3
+**Date:** 2026-04-25 (v1.1.3 spec-coherence sweep — version-stamp bump only); 2026-04-08 (v1.0 baseline)
 **Author:** Levent Sezgin Genc (3EAI Labs Ltd)
-**Source:** VISION.md v1.0, USER_STORIES.md v1.0
+**Source:** VISION.md v1.1.3, USER_STORIES.md v1.1.3
+**v1.1.3 Driver:** Functional requirements FR-B06 (NER-based PII detection), FR-C06 (traffic shadowing), FR-A11 (PII-in-prompt with optional NER) and others were authored into this document during the v1.1 spec-freeze era but the version stamp was not bumped — corrected here. No FRs added or removed in this sweep. Implementation status of each FR maps to the LLD §12 traceability matrix.
 
 ---
 
@@ -460,6 +461,6 @@ The following platform compliance items from the corporate guideline have been a
 
 ---
 
-*Document Version: 1.0 | Created: 2026-04-08*
-*Source: VISION.md v1.0*
-*Status: Draft — Pending Product Owner Approval*
+*Document Version: 1.1.3 | Created: 2026-04-08 | Revised: 2026-04-25 (version-stamp bump only)*
+*Source: VISION.md v1.1.3*
+*Status: v1.1.3 Draft — Pending Product Owner Approval (part of doc-set audit Wave 3)*

@@ -2,7 +2,7 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 1 — Requirements
-**Version:** 1.0
+**Version:** 1.1.3
 **Date:** 2026-04-08
 **Author:** Levent Sezgin Genc (3EAI Labs Ltd)
 **Source:** VISION.md v1.0

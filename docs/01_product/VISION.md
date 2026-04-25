@@ -133,14 +133,16 @@ Modern API Gateways handle traffic but miss three critical enterprise concerns:
 | **WASM (Rust)** | Complex NER, high-throughput masking | < 3ms |
 | **Java sidecar** | Deep NER (named entity recognition), ML-based PII detection | < 10ms (async) |
 
-### 5.4 Compliance
+### 5.4 Compliance Posture (capability statements only — see framing note below)
 
-| Framework | Coverage |
-|-----------|----------|
-| GDPR (EU) | Right to minimization, purpose limitation |
-| KVKK (Turkey) | Personal data masking at processing layer |
-| PDPL (Saudi Arabia / Iraq) | Data localization + masking |
-| PCI-DSS | PAN tokenization, card data masking |
+> **Important framing (locked 2026-04-25 per Karar 3 + `feedback_compliance_framing` memory):** Gatekeeper provides **controls** that operators use to **support** their compliance audits. Gatekeeper does **NOT** certify compliance with any framework — that requires an audited cardholder-data / personal-data environment, which is the operator's responsibility. The cells below are **capability statements**, not certifications.
+
+| Framework | Capability provided |
+|-----------|---------------------|
+| GDPR (EU) | Right to minimization, purpose limitation — supported via PII masking at gateway edge + role-based policies + per-consumer data minimisation |
+| KVKK (Turkey) | Personal data masking at processing layer; Turkish ID (TC Kimlik) regex with checksum validation; default Turkish NER model `savasy/bert-base-turkish-ner-cased` (engine code community; model artefact operator-supplied or enterprise-DPO bundled) |
+| PDPL (Saudi Arabia / Iraq) | Data-localisation-aware masking; geographic-policy enforcement via consumer metadata |
+| PCI-DSS (scope hygiene) | PAN-shape detection in prompts (Luhn-validated) + mask/block strategies prevent cardholder-data egress to upstream LLM providers. **Gatekeeper does NOT claim PCI-DSS compliance** — that requires an audited cardholder-data environment, which remains the operator's audit boundary. |
 
 ### 5.5 Audit & Evidence
 
@@ -384,5 +386,8 @@ Blog   │           │             │             │ 📝 Shield   │ 📝 
 
 *This document is the Phase 1 deliverable per Sentinel SDLC.*
 *Human approval required before proceeding to Phase 2 (Business Analysis).*
+
+*Document Version: 1.1.3 | Created: 2026-04-08 | Revised: 2026-04-25 (v1.1.3 spec-coherence sweep)*
+*Change log v1.0 → v1.1.3: §5.4 Compliance section reframed per Karar 3 (2026-04-25) and `feedback_compliance_framing` memory — table is now "Capability provided" (capability statements), not "Coverage" (certification implication). PCI-DSS row explicitly states "Gatekeeper does NOT claim PCI-DSS compliance — scope hygiene only". Other rows extended with concrete capabilities. Mirrors HLD v1.1.1 §10.2 + RELEASE_NOTES v0.1.1 Compliance Posture + README Compliance Posture (single source of framing across artefacts).*
 
 *Copyright 2026 3EAI Labs Ltd. Apache 2.0 License.*

@@ -2,7 +2,7 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 2 — Business Analysis
-**Version:** 1.0
+**Version:** 1.1.3
 **Date:** 2026-04-08
 **Input:** USER_STORIES.md v1.0, SRS.md v1.0, DATA_CLASSIFICATION.md v1.0
 

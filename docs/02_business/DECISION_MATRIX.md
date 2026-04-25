@@ -2,9 +2,10 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 2 — Business Analysis
-**Version:** 1.0
-**Date:** 2026-04-08
-**Source:** BUSINESS_LOGIC.md v1.0
+**Version:** 1.1.3
+**Date:** 2026-04-25 (v1.1.3 spec-coherence sweep — version-stamp bump + post-v1.0 additions noted); 2026-04-08 (v1.0 baseline)
+**Source:** BUSINESS_LOGIC.md v1.1.3
+**v1.1.3 Driver:** Decision matrices for the post-v1.0 business rules (BR-MK-006 NER fail-mode + circuit-breaker, BR-CN-006/007 shadow + shadow diff bridge thresholds, BR-SH-006 Karar A token fallback) live inline in Phase 4 LLD §12 + ERROR_CODES v1.1.1 alongside the implementation. v0.2 candidate: pull these inline matrices back into this Phase 2 document for consistency. The 12 v1.0 matrices remain valid and authoritative for the original Phase 5 baseline behaviours.
 
 ---
 
@@ -251,6 +252,6 @@ This matrix determines how to interpret error rate signals when both canary and 
 
 ---
 
-*Document Version: 1.0 | Created: 2026-04-08*
-*Source: BUSINESS_LOGIC.md v1.0*
-*Status: Draft — Pending Human Approval*
+*Document Version: 1.1.3 | Created: 2026-04-08 | Revised: 2026-04-25 (version-stamp bump + post-v1.0 additions documented in header)*
+*Source: BUSINESS_LOGIC.md v1.1.3*
+*Status: v1.1.3 Draft — Pending Human Approval (part of doc-set audit Wave 3)*

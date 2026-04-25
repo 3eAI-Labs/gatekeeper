@@ -2,9 +2,10 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 3 — Architecture
-**Version:** 1.1
-**Date:** 2026-04-25 (revised); 2026-04-08 (v1.0 baseline)
+**Version:** 1.1.3
+**Date:** 2026-04-25 (v1.1.3 spec-coherence sweep — version-stamp bump only); 2026-04-25 (v1.1 spec freeze); 2026-04-08 (v1.0 baseline)
 **v1.1 Driver:** PHASE_REVIEW_2026-04-25 — corrected canary admin endpoints to actual APISIX plugin control-plane paths (§2.2-2.4); added §2.5 sidecar HTTP bridges (canonical Lua transport per ADR-008); added §2.6 sidecar health endpoints; flagged gRPC services (§3) as forward-compat-only in v0.1; added NER schema (§4.2).
+**v1.1.3 Driver:** Version-stamp bump only — no API contract surface changes in v1.1.1 (audit-pipeline closure used the existing Redis buffer, no new HTTP endpoint), v1.1.2 (Flyway closure was internal sidecar config), or v1.1.3 (spec-coherence sweep). The §2.5 endpoint conventions remain the canonical guidance.
 
 ---
 
@@ -711,6 +712,7 @@ message HealthCheckResponse {
 
 ---
 
-*Document Version: 1.1 | Created: 2026-04-08 | Revised: 2026-04-25*
-*Status: v1.1 Draft — Pending Human Approval (after PHASE_REVIEW_2026-04-25)*
+*Document Version: 1.1.3 | Created: 2026-04-08 | Revised: 2026-04-25 (v1.1 spec freeze, then v1.1.3 spec-coherence sweep)*
+*Status: v1.1.3 Draft — Pending Human Approval (part of doc-set audit Wave 3)*
 *Change log v1.0 → v1.1: §2.1-2.4 paths corrected to APISIX plugin control-plane convention (`/v1/plugin/aria-canary/{action}/{route_id}`); §2.5 NEW (sidecar HTTP bridges — `/v1/diff`, `/v1/mask/detect` — canonical Lua transport per ADR-008); §2.6 NEW (sidecar health endpoints); §3 reframed as "forward-compat in v0.1" with v0.1 STUB notes on AnalyzePrompt + FilterResponse; §4.2 Mask schema extended with full NER block (BR-MK-006).*
+*Change log v1.1 → v1.1.3: Version-stamp bump only — no API contract changes in v1.1.1 (audit-pipeline closure used the existing Redis buffer + sidecar background pattern, no new HTTP bridge), v1.1.2 (Flyway closure was internal sidecar config, no API surface), or v1.1.3 (spec-coherence sweep).*
