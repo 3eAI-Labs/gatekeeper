@@ -1,11 +1,11 @@
-# Code Review Report — 3e-Aria-Gatekeeper (post-spec-freeze v1.1)
+# Code Review Report — 3e-Aria-Gatekeeper (post-spec-freeze v1.1.1)
 
 **Phase:** 6 — Review & DevOps
-**Date:** 2026-04-25
+**Date:** 2026-04-25 (v1.1.1 audit-pipeline closure update)
 **Reviewer:** AI Reviewer (pending human final review)
 **Replaces:** [`CODE_REVIEW_REPORT v1.0`](archive/CODE_REVIEW_REPORT_v1.0_2026-04-08.md) (2026-04-08), now archived
-**Scope:** All code as of `gatekeeper@a63986f` and `aria-runtime@723ae23` (HLD v1.1 + LLD v1.1; 7+ Lua test files, 16+ Java test files, 121+ JUnit tests; 85 ARIA error codes)
-**Driver:** Spec freeze v1.1 (commit `a63986f`) reconciled artefacts with shipped code; this report verifies post-freeze code health honestly. Replaces the v1.0 report which gave PASS to claims that were either false or stale by 2026-04-25.
+**Scope:** All code as of `gatekeeper@<v1.1.1-commit>` and `aria-runtime@d487026` (HLD v1.1 + LLD v1.1.1 + ADR-009; 7+ Lua test files, 17+ Java test files, 128 JUnit tests; 84 ARIA error codes)
+**Driver:** Spec freeze v1.1 (commit `a63986f`) reconciled artefacts with shipped code; v1.1.1 closes FINDING-003 (audit pipeline) following `aria-runtime@d487026`. This report verifies post-freeze code health honestly. Replaces the v1.0 report which gave PASS to claims that were either false or stale by 2026-04-25.
 
 ---
 
@@ -13,10 +13,11 @@
 
 **CONDITIONAL PASS — merge to v0.1.0 OK with explicit acknowledgment of v0.1 limitations (§10).**
 
-The shipped community-tier code is production-quality for an open-core public release. Three honest gaps must be acknowledged at release time and tracked into v0.2:
-- 🔴 Audit pipeline incomplete (Lua side wired, sidecar consumer not implemented — FINDING-003)
+The shipped community-tier code is production-quality for an open-core public release. Two honest gaps must be acknowledged at release time and tracked into v0.2:
 - 🔴 DB migrations require Helm Job; sidecar does not auto-bootstrap them (FINDING-005)
 - 🟡 ariactl CLI not built (deferred to v0.2 — FINDING-001)
+
+**FINDING-003 (audit pipeline) was closed in v1.1.1** via `aria-runtime@d487026` (`audit/AuditFlusher` Spring `@Scheduled` LPOP drain — see ADR-009). It is no longer carried as a v0.1 gap.
 
 These are documented as v0.1 known limitations in §10 and in `RELEASE_NOTES_v0.1.0_2026-04-25.md`, not papered over with PASS labels.
 
@@ -71,16 +72,16 @@ These are documented as v0.1 known limitations in §10 and in `RELEASE_NOTES_v0.
 |---|---|---|---|
 | Input validation | PASS | — | Request body validated (JSON parse, schema, size limit) |
 | No hardcoded secrets | PASS | — | API keys via APISIX secrets; passwords via env vars from k8s secrets |
-| PII protection in audit | PARTIAL | 🔴 see FINDING-003 | PII masking before audit storage IS implemented; but the audit pipeline itself is broken (sidecar does not consume the Redis buffer), so the protection has no destination in v0.1 |
+| PII protection in audit | PASS | — | PII masking before audit storage is implemented Lua-side; audit pipeline closed in v1.1.1 (`audit/AuditFlusher`, ADR-009) so masked events now reach the `audit_events` table |
 | API keys not in errors/logs | PASS | — | Verified by spot-check; structured logging avoids key fields |
 | SQL injection prevention | PASS | — | R2DBC parameterized queries; no string concatenation |
-| Audit log immutability | DESIGNED, NOT ACTIVE | 🔴 see FINDING-003 | PostgreSQL `DO INSTEAD NOTHING` rules in V001-V003 are correct; but no rows ever land in `audit_events` because no caller invokes `insertAuditEvent` |
+| Audit log immutability | ACTIVE | — | PostgreSQL `DO INSTEAD NOTHING` rules in V001-V003 enforce immutability; `audit/AuditFlusher` (v1.1.1, ADR-009) drains the Lua buffer and persists rows that the rules then protect from UPDATE/DELETE |
 | No dangerous functions | PASS | — | Verified: no `os.execute`, `io.popen`, `loadstring`, `dofile` in Lua; no `Runtime.exec` in Java |
 | Dockerfile security | PASS | — | Non-root, alpine base, healthcheck, no secrets in layers |
 | SAST re-scan on today's HEAD | DEFERRED | — | v1.0 claim "SAST 7/7 PASS" is stale (Apr-08 code, never re-run post-NER bridge or shadow diff). v0.2 must re-run before next release |
 | Loopback bind verification | PASS | — | Sidecar binds `127.0.0.1:8081` only (per ADR-008 + DEPLOYMENT.md NetworkPolicy template) |
 
-**Findings introduced since v1.0:** None new. The v0.1 audit pipeline gap (FINDING-003) is process-level, not a vulnerability — but it does invalidate any compliance claim depending on durable audit (KVKK Art. 12 retention, PCI-DSS-equivalent access logs).
+**Findings introduced since v1.0:** None new. FINDING-003 (audit pipeline) was a process-level gap at v1.1, **closed in v1.1.1** via `aria-runtime@d487026` (ADR-009). Compliance claims depending on durable audit (KVKK Art. 12 retention, PCI-DSS-equivalent access logs) are now substantiated by Gatekeeper alone, modulo operator running migrations (FINDING-005 still open).
 
 ---
 
@@ -89,13 +90,13 @@ These are documented as v0.1 known limitations in §10 and in `RELEASE_NOTES_v0.
 | Check | Status | Notes |
 |---|---|---|
 | Exception hierarchy | PASS | `AriaException` with error-code field; `GrpcExceptionInterceptor` + Spring `@RestControllerAdvice` map to HTTP/gRPC status |
-| Error codes standardized | PASS | `ARIA_{MODULE}_{NAME}` format, **85 codes cataloged** (was 78 in v1.0; +7 new per spec freeze: 3 NER bridge, 2 shadow diff, 1 tokenizer fallback, 1 audit pipeline gap) |
+| Error codes standardized | PASS | `ARIA_{MODULE}_{NAME}` format, **84 codes cataloged** (78 in v1.0 → 85 at v1.1 spec freeze → 84 at v1.1.1 after retiring `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` per ADR-009) |
 | Circuit breaker for externals | PASS | Both layers active (LLD §8.4) — Lua outer per-endpoint + Java inner per-service |
 | Graceful degradation | PASS | Sidecar down → Lua-only mode (`fail_mode: open` default); Redis down → fail-open per quota config; NER bridge down → regex-tier coverage |
 | Graceful shutdown | PASS | `ShutdownManager` drains HTTP + gRPC + datastore clients within `aria.shutdown-grace-seconds` |
 | Resource cleanup | PASS | `set_keepalive()` on Lua Redis cosockets; `@PreDestroy` on Java clients |
 | Thread safety | PASS | Virtual threads + ScopedValue; no ThreadLocal in modified packages |
-| Audit pipeline integrity | **FAIL** | 🔴 FINDING-003 — see §10 |
+| Audit pipeline integrity | **PASS** | Closed in v1.1.1 — `audit/AuditFlusher` Spring `@Scheduled` LPOP drain (ADR-009). `persistedTotal` / `failedTotal` counters expose health to Prometheus. |
 
 ---
 
@@ -156,15 +157,17 @@ These are documented as v0.1 known limitations in §10 and in `RELEASE_NOTES_v0.
 
 These are honest acknowledgments. Each must appear in `RELEASE_NOTES_v0.1.0_2026-04-25.md` "Known Limitations" section.
 
-### 🔴 1. Audit pipeline incomplete (FINDING-003)
-- **What:** `aria-core.lua record_audit_event` pushes JSON onto Redis list `aria:audit_buffer`. Sidecar has `PostgresClient.insertAuditEvent` method but **0 callers anywhere** — no Spring `@Scheduled`, no `BLPOP` consumer, no HTTP/gRPC RPC.
-- **Net effect:** Audit events accumulate with 1h TTL and silently disappear. `audit_events` table receives no inserts on a fresh deployment.
-- **Compliance impact:** BR-SH-015 / BR-MK-005 are PARTIAL (Lua side ✅, sidecar side ❌). KVKK Art. 12 retention cannot be met by Gatekeeper alone in v0.1; operators must use external audit (e.g., APISIX access logs to Loki).
-- **v0.2 fix:** `AuditFlusher` Spring `@Scheduled` bean OR `POST /v1/audit/event` HTTP bridge per ADR-008 (preferred). Add startup readiness check that fails if `audit_events` table missing. Tracked: Task 12 in current plan.
+### ✅ 1. Audit pipeline (FINDING-003) — CLOSED 2026-04-25
+- **Status:** Closed in `aria-runtime@d487026` (same-day after this report's first draft). No longer a v0.1 gap.
+- **Implementation:** `audit/AuditFlusher` — Spring `@Component @Scheduled(fixedDelayString="${aria.audit.flush-interval-ms:5000}")`. Non-blocking LPOP loop on `aria:audit_buffer`, drains up to 100 events per tick to `PostgresClient.insertAuditEvent`. Lua side unchanged.
+- **Decision rationale:** ADR-009 — LPOP polling chosen over the `POST /v1/audit/event` HTTP bridge that earlier drafts of this report had labelled "preferred". Karar A (single-path simplicity) was selected per Levent's "neden iki path?" pushback against the hybrid alternative.
+- **Operator signal:** `AuditFlusher.persistedTotal` / `failedTotal` counters surface to Prometheus. Alert on non-zero `failedTotal` rate.
+- **Deferred to v0.3:** dead-letter queue for poison messages; longer Redis buffer TTL; backpressure on producer.
+- **Test coverage:** 7 new tests in `AuditFlusherTest.java`; suite count 121 → 128, all green.
 
 ### 🔴 2. DB migrations not auto-bootstrapped (FINDING-005)
 - **What:** `db/migration/V001..V003.sql` files exist and are correct. Helm chart ships `migration-job.yaml` (Flyway one-shot Job). But `aria-runtime/src/main/resources/` contains only `application.yml` — no Flyway dependency, no `spring.flyway.*` config.
-- **Net effect:** docker-compose dev users must apply migrations manually; Helm users get them via the Job. Sidecar starts successfully without the tables existing and silently fails on any `insertAuditEvent` / `insertBillingRecord` (compounding FINDING-003).
+- **Net effect:** docker-compose dev users must apply migrations manually; Helm users get them via the Job. Sidecar starts successfully without the tables existing; on missing `audit_events` table, `AuditFlusher` (v1.1.1) will increment `failedTotal` and ERROR-log on every drained event — surfacing the gap, not silencing it.
 - **v0.2 fix:** Add Flyway dependency + `spring.flyway.locations` to `build.gradle.kts` and `application.yml`. Sidecar applies migrations idempotently at startup.
 
 ### 🟡 3. ariactl CLI deferred (FINDING-001)
@@ -201,8 +204,8 @@ The 2026-04-08 report's PASS verdicts that no longer hold (corrected here, archi
 | v1.0 claim | Reality 2026-04-25 | This report |
 |---|---|---|
 | "Implementation matches LLD" PASS | Drifted significantly between 2026-04-08 and 2026-04-25; reconciled by spec freeze v1.1 | §1 PASS *post-freeze* |
-| "All business rules implemented" PASS | BR-SH-015 / BR-MK-005 PARTIAL (audit pipeline broken) | §5 / §10 explicit |
-| "31 codes cataloged" | 85 codes today | §5 noted |
+| "All business rules implemented" PASS | BR-SH-015 / BR-MK-005 PARTIAL at v1.1 spec freeze (audit pipeline broken); **flipped to Implemented at v1.1.1** via `aria-runtime@d487026` + ADR-009 | §5 / §10 §1 closed |
+| "31 codes cataloged" | 84 codes today (78 → 85 at v1.1 freeze → 84 after v1.1.1 retirement of `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED`) | §5 noted |
 | "8 test files" | 7+ Lua + 16+ Java today | §7 updated |
 | "0 Critical / 0 High / 0 Medium findings" | 6 critical + 7 major + 2 minor in PHASE_REVIEW_2026-04-25 | §0 verdict + §10 known gaps |
 | "SAST 7/7 PASS" | Stale (Apr-08 code) — re-run deferred | §4 deferred |
@@ -215,21 +218,21 @@ The 2026-04-08 report's PASS verdicts that no longer hold (corrected here, archi
 
 | Category | Result |
 |---|---|
-| Spec compliance (post-freeze v1.1) | PASS |
+| Spec compliance (post-freeze v1.1.1) | PASS |
 | Architecture | PASS |
 | Code quality | PASS |
-| Security | PASS *with audit-pipeline caveat* |
-| Reliability | CONDITIONAL (audit gap) |
+| Security | PASS |
+| Reliability | PASS |
 | Performance | PASS *with transport reframing* |
 | Testing | PASS *coverage re-run deferred* |
 | Observability | PASS |
 | AI code review | PASS |
-| **Honest known gaps** | 2 critical + 4 minor — see §10 |
+| **Honest known gaps** | 1 critical + 4 minor — see §10 (FINDING-003 closed in v1.1.1) |
 
 **Recommendation:** APPROVE for v0.1.0 release **with explicit human signature** confirming awareness of §10 gaps. The 2026-04-08 process failure (signed-off-as-PASS without human review) must NOT recur. See `GUIDELINES_MANIFEST.yaml` `phase_gates.require_human_signature` for the lock.
 
 ---
 
-*Report Version: 1.1 | Created: 2026-04-25*
-*Driver: PHASE_REVIEW_2026-04-25.md (15 findings) + spec freeze commit `a63986f`*
+*Report Version: 1.1.1 | Created: 2026-04-25 | Revised: 2026-04-25 (audit-pipeline closure)*
+*Driver: PHASE_REVIEW_2026-04-25.md (15 findings) + spec freeze commit `a63986f` + audit closure `aria-runtime@d487026` + ADR-009*
 *Status: AI Review Complete — **Human Final Review REQUIRED before merge**. Do not silently treat as approval.*

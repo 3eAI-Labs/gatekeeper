@@ -2,11 +2,12 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 3 — Architecture
-**Version:** 1.1
-**Date:** 2026-04-25 (revised); 2026-04-08 (v1.0 baseline)
+**Version:** 1.1.1
+**Date:** 2026-04-25 (v1.1.1 audit-pipeline closure); 2026-04-25 (v1.1 spec freeze); 2026-04-08 (v1.0 baseline)
 **Author:** AI Architect + Human Oversight (PO: Levent Sezgin Genç)
 **Input:** BUSINESS_LOGIC.md v1.0, DECISION_MATRIX.md v1.0, EXCEPTION_CODES.md v1.0
 **v1.1 Driver:** PHASE_REVIEW_2026-04-25 adversarial drift report — 6 critical, 7 major, 2 minor findings; HLD reconciled to actual shipped state (HTTP bridge over gRPC, mask NER, shadow diff, license-tier reframe, PCI-DSS scope-hygiene reframe).
+**v1.1.1 Driver:** Audit pipeline gap (FINDING-003) **closed** in `aria-runtime@d487026` via `audit/AuditFlusher` Spring `@Scheduled` LPOP drain. Decision recorded in **ADR-009** (LPOP polling chosen over HTTP bridge per Karar A "single-path simplicity"). All "audit pipeline gap" / "v0.2 fix" markers in this document flipped to closed-state language. §8.3 rewritten to describe shipped behaviour rather than the v0.1 gap.
 
 ---
 
@@ -220,7 +221,7 @@ Dynamic data masking in API responses — field-level JSONPath masking with role
 2. Role-based policy resolution (BR-MK-002)
 3. PII pattern regex detection (BR-MK-003)
 4. Configurable mask strategies (BR-MK-004)
-5. Masking audit event recording (BR-MK-005) — *Lua side wired; sidecar consumer not yet implemented in v0.1, see §8.3*
+5. Masking audit event recording (BR-MK-005) — *shipped end-to-end (Lua emit + sidecar `audit/AuditFlusher` LPOP drain per ADR-009; see §8.3)*
 6. NER-backed PII detection via sidecar HTTP bridge (BR-MK-006) — pluggable multi-engine pipeline (OpenNLP English + DJL HuggingFace Turkish/multilingual); engine code is community tier, model artefacts are operator-supplied (slim image) or enterprise tier (bundled multilingual)
 
 **Internal Dependencies:**
@@ -505,7 +506,7 @@ Aria does NOT implement its own authentication. It relies entirely on APISIX's c
 | Data | Protection | Implementation |
 |------|-----------|----------------|
 | Provider API keys (L4) | Encrypted at rest, never logged | APISIX secrets vault integration |
-| Audit log payload excerpts (L3) | PII masked before storage | BR-SH-015, BR-MK-005 — *Lua side calls `record_audit_event` (BR-SH-015); the sidecar consumer/persistence is **NOT YET WIRED in v0.1** (see §8.3 + PHASE_REVIEW FINDING-003). v0.2 implements `AuditFlusher`.* |
+| Audit log payload excerpts (L3) | PII masked before storage | BR-SH-015, BR-MK-005 — *shipped end-to-end. Lua side calls `record_audit_event` (PII pre-masked); sidecar `audit/AuditFlusher` (Spring `@Scheduled` LPOP drain, ADR-009) persists to `audit_events`. PostgreSQL `DO INSTEAD NOTHING` rules enforce immutability post-insert.* |
 | Redis quota data (L2) | TLS 1.3 in transit | Redis TLS configuration |
 | Postgres audit data (L2-L3) | TDE at rest, TLS 1.3 in transit | Database-level encryption |
 | Lua↔sidecar HTTP traffic | Loopback-bound (127.0.0.1) + NetworkPolicy | No network exposure within trusted pod boundary; see §5.1 + ADR-008 |
@@ -721,22 +722,23 @@ OpenTelemetry spans for sidecar HTTP calls (post-ADR-008):
 
 ### 8.3 PostgreSQL Failure
 
-**Detection:** Connection timeout or refused.
-**Designed impact:** Audit events buffered in Redis until PG returns; background flush job retries every 5 seconds; buffer overflow drops oldest and emits `aria_audit_buffer_overflow`.
-**Designed response:**
-1. Buffer audit events in Redis list `aria:audit_buffer` (max 1000, FIFO)
-2. `AuditFlusher` background job retries every 5 seconds
-3. If buffer exceeds 1000, drop oldest and emit `aria_audit_buffer_overflow`
-4. No impact on request pipeline (audit is async)
-5. Recovery: flush Redis buffer to Postgres on reconnection
+**Detection:** Connection timeout or refused on `PostgresClient.insertAuditEvent` calls from `audit/AuditFlusher`.
+**Impact:** Audit events buffered in Redis list `aria:audit_buffer` until PG returns. Per-event persist failures increment `AuditFlusher.failedTotal` and ERROR-log; buffer overflow risk bounded by Redis 1h TTL on the list.
+**Response:**
+1. Lua side continues pushing to `aria:audit_buffer` (no impact on request pipeline — audit is asynchronous by design).
+2. `audit/AuditFlusher` Spring `@Scheduled` job (default 5s `aria.audit.flush-interval-ms`) attempts to drain via LPOP and persist each event; on per-event failure logs at ERROR + increments `failedTotal`, drops the event (poison-message containment).
+3. Redis 1h TTL on the buffer list bounds memory growth during prolonged outages — events older than the TTL are dropped at the Redis layer (operator alert: monitor list length).
+4. Lettuce auto-reconnects to Redis on transient failures; the next scheduler tick retries the entire drain.
 
-**v0.1 reality (KNOWN GAP — PHASE_REVIEW FINDING-003):**
-- Lua side calls `aria_core.record_audit_event()` correctly — events ARE pushed onto Redis list `aria:audit_buffer`.
-- **Sidecar `AuditFlusher` is NOT IMPLEMENTED.** `PostgresClient.insertAuditEvent()` exists but has zero callers. There is no scheduled job, no HTTP endpoint, no gRPC RPC consuming the Redis list.
-- **Net effect in v0.1:** audit events accumulate in the Redis list with the configured 1h TTL and are silently dropped. `audit_events` table receives no inserts. BR-SH-015 / BR-MK-005 are not durably implemented despite Lua-side wiring.
-- **v0.2 plan:** Implement `AuditFlusher` Spring `@Scheduled` bean (BLPOP every 5s) **or** add `POST /v1/audit/event` HTTP bridge per ADR-008 pattern (preferred). Add Flyway `V001__create_audit_events.sql` migration so the destination table exists. Add startup readiness check that confirms `audit_events` table presence — sidecar should fail readiness if table missing.
+**Recovery:** Automatic — sidecar resumes draining on next tick after PG comes back. Events queued during the outage drain at `MAX_PER_TICK=100`/tick rate.
 
-**Recovery (after v0.2 fix):** Automatic — flush Redis buffer to Postgres on reconnection.
+**v0.3 hardening candidates** (not v0.1.0 scope):
+- Dead-letter queue (`aria:audit_dead_letter` Redis list) for persistently failing events with operator-driven replay tooling.
+- Configurable buffer TTL (raise from 1h to operator-chosen window).
+- Sidecar startup readiness check that fails if Redis buffer length exceeds threshold (operator alert, do not silently drop).
+- `BLPOP` blocking consumer to reduce idle wakeups (would require a dedicated worker thread; rejected for v0.1 per ADR-009 "Alternatives Considered").
+
+**Decision rationale:** ADR-009 documents why LPOP polling was chosen over an HTTP bridge for this asynchronous emit-and-drain flow. ADR-008's HTTP bridge pattern remains canonical for synchronous Lua→sidecar request/response (`/v1/diff`, `/v1/mask/detect`); the two patterns are orthogonal.
 
 ### 8.4 LLM Provider Failure
 
@@ -911,6 +913,7 @@ See `docs/03_architecture/ADR/` for detailed ADRs:
 | ADR-006 | No Kafka in v1.0 | All IPC is synchronous (HTTP/JSON loopback) or fire-and-forget. Kafka adds complexity without proportional benefit for plugin-to-sidecar communication | Accepted |
 | ADR-007 | Grafana + ariactl instead of Admin UI | v1.0 ops via Grafana dashboards. ariactl CLI deferred to v0.2 (see HLD §3.5). | Accepted (CLI portion deferred) |
 | ADR-008 | HTTP/JSON bridge supersedes gRPC-UDS for Lua-callable sidecar endpoints | All Lua↔sidecar calls use `resty.http` over `127.0.0.1:8081`. gRPC services retained as forward-compat for non-Lua callers. Cross-transport engine-sharing pattern canonical. | **Accepted (2026-04-25)** — supersedes ADR-003 for Lua transport |
+| ADR-009 | Sidecar audit pipeline uses LPOP polling, not HTTP bridge | `audit/AuditFlusher` Spring `@Scheduled` LPOP drain of `aria:audit_buffer` → `PostgresClient.insertAuditEvent`. Lua side unchanged. Karar A (single-path simplicity) chosen over `POST /v1/audit/event` HTTP bridge per Levent's "neden iki path?" pushback. ADR-008 not invalidated — orthogonal pattern (sync request/response vs async emit-and-drain). | **Accepted (2026-04-25)** — closes FINDING-003 |
 
 ---
 
@@ -966,6 +969,7 @@ For a feature **not yet implemented** (e.g., advanced WORM audit log), the table
 
 ---
 
-*Document Version: 1.1 | Created: 2026-04-08 | Revised: 2026-04-25*
-*Status: v1.1 Draft — Pending Human Approval (after PHASE_REVIEW_2026-04-25 adversarial drift report)*
+*Document Version: 1.1.1 | Created: 2026-04-08 | Revised: 2026-04-25 (v1.1 spec freeze, then v1.1.1 audit-pipeline closure)*
+*Status: v1.1.1 Draft — Pending Human Approval (PHASE_REVIEW_2026-04-25 sweep + audit pipeline closure)*
 *Change log v1.0 → v1.1: §1.2 boundary diagram (UDS→HTTP), §2.1/§2.2/§2.3 transport + ariactl deferral, §3.4 module structure (shipped reality), §3.5 ariactl deferred, §4.2 internal interfaces, §5.1 trust diagram, §5.4 audit gap acknowledgment, §6.3 tracing diagram, §7.4 NFR transport, §8.3 audit pipeline gap, §9.1 tokenize key reserved, §10.2 PCI-DSS scope-hygiene reframe, §13 ADR table (ADR-003 superseded, ADR-008 added), §14 Tiering & License (NEW)*
+*Change log v1.1 → v1.1.1: §3.2 BR-MK-005 status flipped to "shipped end-to-end". §5.4 audit-payload-excerpts row flipped to "shipped end-to-end" with ADR-009 reference. §8.3 PostgreSQL Failure rewritten to describe shipped `AuditFlusher` behaviour (LPOP polling, poison-message containment, Lettuce auto-reconnect) and v0.3 hardening candidates; the "v0.1 KNOWN GAP" subsection removed. §13 ADR table updated to include ADR-009. Decision: LPOP polling over HTTP bridge per Karar A.*

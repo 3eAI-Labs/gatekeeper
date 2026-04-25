@@ -3,7 +3,7 @@
 **Release Date:** 2026-04-25
 **License:** Apache 2.0 (Lua plugins) · community + persona-gated enterprise tiers (Java sidecar)
 **Replaces:** [`RELEASE_NOTES v1.0`](archive/RELEASE_NOTES_v1.0_2026-04-08.md) (2026-04-08), now archived
-**Driver:** Spec freeze v1.1 (`gatekeeper@a63986f`) + adversarial drift report (`PHASE_REVIEW_2026-04-25.md`) — supersedes the 2026-04-08 release notes which contained claims that did not match shipped reality.
+**Driver:** Spec freeze v1.1 (`gatekeeper@a63986f`) + adversarial drift report (`PHASE_REVIEW_2026-04-25.md`) + audit-pipeline closure v1.1.1 (`aria-runtime@d487026`, ADR-009) — supersedes the 2026-04-08 release notes which contained claims that did not match shipped reality.
 
 ---
 
@@ -19,6 +19,7 @@ This v0.1.0 release captures the first 17 days of community-tier shipping after 
 - License model formalised: open-core Apache 2.0 + persona-gated enterprise tiers
 - HTTP/JSON over loopback TCP as the canonical Lua↔sidecar transport (ADR-008 supersedes ADR-003 for the Lua portion)
 - Operator documentation rewritten end-to-end (QUICK_START + CONFIGURATION + DEPLOYMENT, 2026-04-25)
+- Audit pipeline closed end-to-end via `audit/AuditFlusher` Spring `@Scheduled` LPOP drain (ADR-009; closes FINDING-003 from `PHASE_REVIEW_2026-04-25.md`)
 
 ---
 
@@ -95,7 +96,7 @@ The defensible enterprise moat is in **continuously-updated assets** (injection 
 | **PDPL (Saudi Arabia / Iraq)** | Same as GDPR + geographic-policy enforcement via consumer metadata |
 | **PCI-DSS scope hygiene** | PAN-shape detection in prompts (Luhn-validated); mask/block strategies prevent cardholder-data egress to upstream LLM providers. **Gatekeeper does NOT claim PCI-DSS compliance** — that requires an audited cardholder-data environment, which remains the operator's audit boundary. |
 
-> **Note:** Durable audit log persistence (required for BR-SH-015 / BR-MK-005 / KVKK Art. 12 retention) has a **known v0.1 gap** — see Known Limitations below. v0.2 closes this gap.
+> **Audit pipeline status:** Durable audit log persistence (required for BR-SH-015 / BR-MK-005 / KVKK Art. 12 retention) is **shipped end-to-end** in v0.1.0 — `audit/AuditFlusher` (Spring `@Scheduled` LPOP drain, ADR-009) persists Lua-emitted events to Postgres. Operators must still ensure the migration Job has run (see Known Limitations §2 about migration bootstrap).
 
 ---
 
@@ -153,7 +154,7 @@ Updated from the 2026-04-08 sister doc with shipped iterations.
 | US-B02 | Role-based policies | Shipped |
 | US-B03 | PII pattern detection | Shipped |
 | US-B04 | Configurable strategies | Shipped (12 strategies; `tokenize` emits non-reversible hash in v0.1 — Redis-backed reversible token reserved for v0.2) |
-| US-B05 | Masking audit log | **PARTIAL.** Lua side wired; sidecar consumer not implemented — see Known Limitations §1 |
+| US-B05 | Masking audit log | Shipped end-to-end (`audit/AuditFlusher` Spring `@Scheduled` LPOP drain — see ADR-009; closes FINDING-003) |
 | US-B06 | NER-backed PII detection | Shipped 2026-04-24 (BR-MK-006) — engine code only, model artefacts operator-supplied |
 | US-C01 | Progressive splitting | Shipped |
 | US-C02 | Error-rate monitoring | Shipped |
@@ -174,23 +175,25 @@ Full traceability + deferral matrix: LLD v1.1 §12.
 
 > 🔴 = blocks compliance/durability claims · 🟡 = workaround exists · 🟢 = nice-to-have deferred
 
-### 🔴 1. Audit pipeline incomplete (FINDING-003)
+### ✅ 1. Audit pipeline (FINDING-003) — CLOSED in v1.1.1 (`aria-runtime@d487026`)
 
-`aria-core.lua record_audit_event` correctly pushes JSON onto the Redis list `aria:audit_buffer` (1h TTL). But the sidecar consumer side is **not implemented in v0.1**: `PostgresClient.insertAuditEvent` exists with full implementation, yet has zero callers across the entire `aria-runtime` codebase. No `AuditFlusher` Spring `@Scheduled` bean, no `BLPOP` worker, no HTTP/gRPC RPC.
+This was tracked as a critical v0.1 gap in earlier drafts of this document. **It was closed end-to-end** in `aria-runtime@d487026` (same-day after the v1.1 spec freeze).
 
-**Net effect:** audit events accumulate in Redis with the configured TTL and are silently dropped. The `audit_events` Postgres table receives no inserts on a fresh deployment.
+**Implementation:** `audit/AuditFlusher` — Spring `@Component @Scheduled(fixedDelayString="${aria.audit.flush-interval-ms:5000}")`. Non-blocking LPOP loop on `aria:audit_buffer`, drains up to 100 events per scheduler tick to `PostgresClient.insertAuditEvent`. Lua side `record_audit_event` unchanged. Test count 121 → 128, all green.
 
-**Compliance impact:** BR-SH-015 (Audit Event Recording, "Must" priority) and BR-MK-005 (Masking Audit, "Must" priority) are PARTIAL, not Implemented. KVKK Art. 12 retention requirement and any compliance-supportive audit claim cannot be met by Gatekeeper alone in v0.1.
+**Decision rationale (ADR-009):** LPOP polling chosen over the `POST /v1/audit/event` HTTP bridge that this document had earlier labelled "preferred". Karar A (single-path simplicity, sidecar bears all complexity) selected per Levent's "neden iki path?" pushback against the hybrid alternative. ADR-009 documents the orthogonality with ADR-008 (HTTP bridge governs synchronous Lua→sidecar request/response; audit is asynchronous Lua emit → Redis buffer → sidecar drain — different patterns, no conflict).
 
-**Operator workaround for v0.1:** Use external audit pipelines — APISIX access logs to Loki with PII-masking extraction rules, or APISIX `http-logger` plugin to your existing SIEM. Gatekeeper's metrics (`aria_security_events_total`, `aria_mask_applied`, `aria_canary_rollback_total`) cover the operational side; what's missing is the per-request immutable trail.
+**Operator signal:** `AuditFlusher.persistedTotal` / `failedTotal` counters expose health to Prometheus. Alert on non-zero `failedTotal` rate. No new ARIA error code is emitted by the closed pipeline (the previously-reserved `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` was retired in ERROR_CODES.md v1.1.1).
 
-**v0.2 fix (committed):** Implement either (a) Spring `@Scheduled` `AuditFlusher` bean that BLPOPs the Redis list and calls `insertAuditEvent`, or (b) **preferred** — add `POST /v1/audit/event` HTTP bridge per ADR-008 pattern (Lua fire-and-forget, sidecar persists). Add a sidecar startup readiness check that fails if `audit_events` table missing.
+**Status:** BR-SH-015 (Audit Event Recording) and BR-MK-005 (Masking Audit) are now Implemented end-to-end. KVKK Art. 12 retention and any compliance-supportive durable-audit claim is substantiated by Gatekeeper alone (modulo operator running migrations — see §2 below).
+
+**Deferred to v0.3:** dead-letter queue for poison messages; longer Redis buffer TTL; backpressure on producer; sub-second visibility (current default is 5s flush interval, configurable down to ~250ms).
 
 ### 🔴 2. DB migrations not auto-bootstrapped by sidecar (FINDING-005)
 
 Migration SQL files (`V001..V003`) exist in `db/migration/` and are correct (verified consistent with DB_SCHEMA.md DDL). The Helm chart includes a one-shot Flyway Job that runs them before the sidecar Deployment is rolled. **But the sidecar JAR does not include a Flyway runner** — `aria-runtime/build.gradle.kts` has no Flyway dependency and `application.yml` has no `spring.flyway.*` config.
 
-**Net effect:** docker-compose dev users must apply migrations manually; Helm users get them via the migration Job. Sidecar starts successfully without the tables existing and silently fails on any audit/billing write — compounding Limitation §1.
+**Net effect:** docker-compose dev users must apply migrations manually; Helm users get them via the migration Job. Sidecar starts successfully without the tables existing; on missing `audit_events` table the v1.1.1 `AuditFlusher` will increment `failedTotal` and ERROR-log on every drained event — surfacing the gap rather than silencing it. (This is a deliberate change vs the pre-v1.1.1 silent-drop behaviour.)
 
 **Operator workaround for v0.1:** Always run the Helm migration Job before bringing up the sidecar; for docker-compose, run `flyway/flyway:10-alpine migrate` once against the dev Postgres before `compose up`.
 
@@ -237,7 +240,7 @@ Lua + Java sidecar covers the v0.1 perf envelope. WASM remains a planned high-th
 
 ### 🟢 8. Coverage / SAST re-run on post-NER HEAD
 
-Pre-existing test infrastructure intact (busted for Lua, JUnit + Mockito for Java). v1.0 release notes' coverage / SAST claims have not been re-run against today's HEAD (jtokkit, NER package, HTTP controllers added since); v0.2 should add JaCoCo gate (Java) + busted coverage report (Lua) to CI and re-run SAST against `aria-runtime@723ae23` or later.
+Pre-existing test infrastructure intact (busted for Lua, JUnit + Mockito for Java). v1.0 release notes' coverage / SAST claims have not been re-run against today's HEAD (jtokkit, NER package, HTTP controllers, AuditFlusher all added since); v0.2 should add JaCoCo gate (Java) + busted coverage report (Lua) to CI and re-run SAST against `aria-runtime@d487026` or later.
 
 ### 🟢 9. Latency guard P95 simplification
 
@@ -254,8 +257,8 @@ For full audit trail, see [`PHASE_REVIEW_2026-04-25.md`](PHASE_REVIEW_2026-04-25
 | *"GDPR/KVKK/PCI-DSS compliance without code changes"* | Reframed: capability statements only. PCI-DSS is **scope hygiene**, not compliance certification. See "Compliance Posture" above and [`feedback memory: compliance framing`](../../memory). |
 | *"~0.1ms IPC via Unix Domain Sockets"* | **Wrong by 1-2 orders of magnitude.** UDS gRPC was the v1.0 design intent (ADR-003); shipped reality is HTTP/JSON over loopback TCP (~1-2ms) per ADR-008 (supersedes ADR-003 for Lua transport). Trade-off accepted to avoid `lua-resty-grpc` dependency. |
 | *"Sidecar handlers are stubs: Prompt analysis, tiktoken counting, NER detection, and shadow diff engine will be implemented in v0.3"* | **Outdated.** Token counting is real (jtokkit, since 2026-04-22). Shadow diff is real (`DiffEngine`, since 2026-04-22 → 2026-04-23). NER detection engine is real (since 2026-04-24); model artefacts remain operator-supplied or enterprise-DPO bundled. Only `PromptAnalyzer` + `ContentFilter` remain stubs in v0.1 — see Limitations §4. |
-| *"All business rules implemented PASS"* | **PARTIAL.** BR-SH-015 / BR-MK-005 audit pipelines are partial (Limitations §1). BR-CN-005 was missing from the v1.0 traceability matrix despite being implemented (corrected in LLD v1.1 §12). New BRs since 2026-04-08: BR-MK-006 (NER), BR-CN-006 (shadow), BR-CN-007 (shadow diff). |
-| *"31 codes cataloged"* | **85 codes today.** New ARIA codes added per spec freeze: `ARIA_MK_NER_*` (3), `ARIA_CN_SHADOW_*` (2), `ARIA_RT_TOKENIZER_FALLBACK`, `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED`. |
+| *"All business rules implemented PASS"* | **PARTIAL at v1.0; now Implemented at v1.1.1.** BR-SH-015 / BR-MK-005 audit pipelines were PARTIAL through the v1.1 spec freeze; flipped to Implemented end-to-end in v1.1.1 via `audit/AuditFlusher` (`aria-runtime@d487026`, ADR-009). BR-CN-005 was missing from the v1.0 traceability matrix despite being implemented (corrected in LLD v1.1 §12). New BRs since 2026-04-08: BR-MK-006 (NER), BR-CN-006 (shadow), BR-CN-007 (shadow diff). |
+| *"31 codes cataloged"* | **84 codes today** (78 → 85 at v1.1 freeze → 84 after v1.1.1 retired `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` per ADR-009). New ARIA codes added per spec freeze: `ARIA_MK_NER_*` (3), `ARIA_CN_SHADOW_*` (2), `ARIA_RT_TOKENIZER_FALLBACK`. |
 | *"ariactl CLI"* — listed as shipped under "Known Limitations: No Admin UI" | **Deferred to v0.2** — see Limitations §3 above. v0.1 substitute documented. |
 | *"AI Reviewer pending human final review"* — silently treated as approval | **This release explicitly requires human signature** before merge. See `GUIDELINES_MANIFEST.yaml` `phase_gates.require_human_signature`. The 2026-04-08 process failure must not recur. |
 
@@ -263,19 +266,20 @@ For full audit trail, see [`PHASE_REVIEW_2026-04-25.md`](PHASE_REVIEW_2026-04-25
 
 ## Status
 
-**Pending Human Final Review.** This v0.1.0 release will not be tagged or pushed to a release artefact until a human signature (in commit history, not just memory files) confirms acknowledgment of all Known Limitations §1-§9 above. See `GUIDELINES_MANIFEST.yaml` `phase_gates.require_human_signature`.
+**Pending Human Final Review.** This v0.1.0 release will not be tagged or pushed to a release artefact until a human signature (in commit history, not just memory files) confirms acknowledgment of all Known Limitations §1 (closed in v1.1.1) through §9 above. See `GUIDELINES_MANIFEST.yaml` `phase_gates.require_human_signature`.
 
 ---
 
 ## See also
 
 - [`HLD.md`](../03_architecture/HLD.md) v1.1 — High-Level Design
-- [`LLD.md`](../04_design/LLD.md) v1.1 — Low-Level Design
+- [`LLD.md`](../04_design/LLD.md) v1.1.1 — Low-Level Design (audit pipeline closure update)
 - [`API_CONTRACTS.md`](../03_architecture/API_CONTRACTS.md) v1.1 — REST + HTTP bridge + gRPC + plugin schemas
-- [`ERROR_CODES.md`](../04_design/ERROR_CODES.md) v1.1 — 85 ARIA error codes
+- [`ERROR_CODES.md`](../04_design/ERROR_CODES.md) v1.1.1 — 84 ARIA error codes (`ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` retired)
 - [`ADR-008`](../03_architecture/ADR/ADR-008-http-bridge-over-grpc.md) — HTTP-bridge supersedes gRPC-UDS for Lua transport
+- [`ADR-009`](../03_architecture/ADR/ADR-009-audit-flusher-lpop-polling.md) — Audit pipeline uses LPOP polling, not HTTP bridge (closes FINDING-003)
 - [`PHASE_REVIEW_2026-04-25.md`](PHASE_REVIEW_2026-04-25.md) — adversarial drift report (15 findings) driving this release
-- [`CODE_REVIEW_REPORT_2026-04-25.md`](CODE_REVIEW_REPORT_2026-04-25.md) — code review post-spec-freeze v1.1
+- [`CODE_REVIEW_REPORT_2026-04-25.md`](CODE_REVIEW_REPORT_2026-04-25.md) v1.1.1 — code review post-spec-freeze v1.1.1 (audit-pipeline closure update)
 - [`archive/RELEASE_NOTES_v1.0_2026-04-08.md`](archive/RELEASE_NOTES_v1.0_2026-04-08.md) — historical baseline (claims now corrected)
 
 ---

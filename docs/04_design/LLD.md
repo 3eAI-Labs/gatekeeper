@@ -2,10 +2,11 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 4 — Low-Level Design
-**Version:** 1.1
-**Date:** 2026-04-25 (revised); 2026-04-08 (v1.0 baseline)
+**Version:** 1.1.1
+**Date:** 2026-04-25 (v1.1.1 audit-pipeline closure); 2026-04-25 (v1.1 spec freeze); 2026-04-08 (v1.0 baseline)
 **Input:** HLD.md v1.1, BUSINESS_LOGIC.md v1.0, DECISION_MATRIX.md v1.0
 **v1.1 Driver:** PHASE_REVIEW_2026-04-25 adversarial drift audit. Reconciles to shipped reality: HTTP bridge over gRPC for Lua transport (ADR-008), mask NER pipeline (BR-MK-006), canary admin control_api (BR-CN-005), shadow diff structural compare (BR-CN-007), `aria-circuit-breaker.lua` shared lib, audit pipeline gap acknowledgment, Karar A `cl100k_base` fallback, ariactl deferred.
+**v1.1.1 Driver:** Audit pipeline gap (FINDING-003) **closed** in `aria-runtime@d487026` via `AuditFlusher` Spring `@Scheduled` LPOP drain. Decision recorded in **ADR-009** (LPOP polling chosen over HTTP bridge). All "audit pipeline gap" / "0 callers" / "v0.2 fix" markers in this document flipped to closed-state language.
 
 ---
 
@@ -69,16 +70,18 @@ aria-runtime/                        # Java 21 sidecar repo (proprietary, separa
 │   │   └── DiffEngine.java          # REAL — structural diff (status, headers, body), shipped 2026-04-22 → 2026-04-23 across Iter 1+2+2c+3
 │   ├── common/
 │   │   ├── AriaRedisClient.java     # Lettuce async (was "RedisClient" in v1.0 spec)
-│   │   ├── PostgresClient.java      # R2DBC async — insertAuditEvent() exists but has 0 callers in v0.1 (FINDING-003)
+│   │   ├── PostgresClient.java      # R2DBC async — insertAuditEvent() called by audit/AuditFlusher per ADR-009
 │   │   └── AriaException.java
+│   ├── audit/                        # Audit pipeline (closes FINDING-003, see ADR-009)
+│   │   └── AuditFlusher.java         # @Component @Scheduled — LPOP drain of aria:audit_buffer → PostgresClient.insertAuditEvent (default 5s tick, batch=100)
 │   └── config/
-│       └── AriaConfig.java          # @ConfigurationProperties: uds-path, shutdown-grace-seconds, mask.ner.*
+│       └── AriaConfig.java          # @ConfigurationProperties: uds-path, shutdown-grace-seconds, mask.ner.*, audit.flush-interval-ms
 ├── src/main/proto/
 │   ├── shield.proto
 │   ├── mask.proto
 │   ├── canary.proto
 │   └── health.proto
-└── src/test/                        # JUnit 5: 121 tests as of 2026-04-24
+└── src/test/                        # JUnit 5: 128 tests as of 2026-04-25 (AuditFlusher closure +7 since 2026-04-24)
 
 ariactl/                              # DEFERRED to v0.2 (HLD §3.5, ADR-007). Directory does not exist in v0.1; v0.1 substitute = APISIX Admin API + canary control_api endpoints (§4.4).
 ```
@@ -308,7 +311,7 @@ end
 | `calculate_cost(conf, model, usage)` | BR-SH-007 | — | model, token counts | Dollar amount (decimal) | Shipped |
 | `update_quota(ctx, tokens)` | BR-SH-005 | — | token count | Redis INCRBY | Shipped |
 | `check_alert_thresholds(conf, ctx)` | BR-SH-009 | — | thresholds, current usage | Alert sent or skipped | Shipped |
-| `record_audit_event(ctx, type, details)` | BR-SH-015 | — | event type, masked details | Pushes JSON onto Redis list `aria:audit_buffer` (1h TTL). | **Lua side shipped; sidecar consumer NOT IMPLEMENTED in v0.1 (FINDING-003).** Events accumulate in Redis and TTL out without being written to `audit_events` table. v0.2 fix: implement `AuditFlusher` Spring `@Scheduled` bean OR add `POST /v1/audit/event` HTTP bridge per ADR-008 pattern (preferred). See HLD §8.3. |
+| `record_audit_event(ctx, type, details)` | BR-SH-015 | — | event type, masked details | Pushes JSON onto Redis list `aria:audit_buffer` (1h TTL). | **Shipped end-to-end (closed 2026-04-25, `aria-runtime@d487026`, ADR-009).** Sidecar `audit/AuditFlusher` Spring `@Scheduled` drains the list via LPOP every 5s (configurable via `aria.audit.flush-interval-ms`) and persists each event to the `audit_events` table. Lua side unchanged. |
 
 **v0.1 implementation status legend.** Rows marked "Shipped" have working Lua implementations exercised by integration tests. Rows with explicit deferral notes are documented gaps that v0.2/v0.3 must close. The Lua-tier branch of BR-SH-011 (regex prompt-injection scan) ships in v0.1 and provides community-tier prompt security; the sidecar-tier branch (vector similarity + corpus matching) is enterprise CISO scope and intentionally deferred — see HLD §14 Tiering & License.
 
@@ -1043,13 +1046,20 @@ AriaRuntimeApplication                          # @SpringBootApplication
 │   ├── AriaRedisClient                         # Lettuce async (renamed from "RedisClient" in v1.0 spec)
 │   │   ├── get(String key) → CompletableFuture<String>
 │   │   ├── incrBy(String key, long amount) → CompletableFuture<Long>
-│   │   ├── lpush / rpush / blpop                # for audit buffer (consumer not yet wired — FINDING-003)
+│   │   ├── lpush / rpush / lpop                 # for audit buffer (consumed by audit/AuditFlusher per ADR-009)
 │   │   └── close()
 │   ├── PostgresClient                          # R2DBC async
-│   │   ├── insertAuditEvent(...) → CompletableFuture<Void>   ← v0.1: 0 callers; FINDING-003 / HLD §8.3
+│   │   ├── insertAuditEvent(...) → CompletableFuture<Void>   ← called by audit/AuditFlusher per ADR-009
 │   │   ├── insertBillingRecord(...) → CompletableFuture<Void>
 │   │   └── close()
 │   └── AriaException
+│
+├── audit/                                       # Audit pipeline (closes FINDING-003 per ADR-009)
+│   └── AuditFlusher                             # @Component @Scheduled(fixedDelayString="${aria.audit.flush-interval-ms:5000}")
+│       ├── flush()                              # one tick: drain ≤MAX_PER_TICK (100) events via LPOP, persist each
+│       ├── persistOne(String json)              # parse + insertAuditEvent; on failure → log + increment failedTotal (poison-message containment)
+│       ├── persistedTotal() → long              # cumulative successful persists (Prometheus-exposed)
+│       └── failedTotal() → long                 # cumulative drops (parse OR persist failures)
 │
 └── config/
     └── AriaConfig                              # @ConfigurationProperties("aria") — uds-path, shutdown-grace-seconds, mask.ner.*
@@ -1135,7 +1145,7 @@ public class MaskController {
 **Why this pattern, not just gRPC.** ADR-008 documents the rationale (no Lua gRPC client; debuggability with curl; performance trade-off accepted). For LLD purposes, the contract is: *new sidecar functionality exposed to Lua MUST go through the HTTP bridge pattern; new domain services SHOULD be Spring `@Service` beans so both transports can share the implementation when forward-compat needs add the gRPC side later.*
 
 **Bridge endpoint conventions** (followed by both `DiffController` and `MaskController`, recommended for future bridges):
-- Path prefix: `/v1/{module}/{action}`. Example: `/v1/audit/event` (planned for FINDING-003 fix).
+- Path prefix: `/v1/{module}/{action}`. Examples: `/v1/diff`, `/v1/mask/detect`. (The audit pipeline intentionally does NOT use this pattern — async emit-via-Redis-buffer + sidecar LPOP polling was chosen instead, per ADR-009.)
 - Request: JSON body with explicit base64 fields for binary payloads (do not rely on multipart).
 - Response: JSON, with `X-Aria-Trace-Id` header for correlation.
 - Errors: HTTP status + JSON `{ "error": { "type": "aria_error", "code": "ARIA_*", "message": "..." } }` per HLD §4.3.
@@ -1177,7 +1187,7 @@ public record TokenCountResult(int tokenCount, String encodingUsed, Accuracy acc
 public enum Accuracy { EXACT, FALLBACK }
 ```
 
-**Reconciliation (per BR-SH-006).** The Lua side computes a fast approximate token count in `body_filter` and updates Redis quota immediately (write-then-correct pattern). When the sidecar has the response body it computes `exact - approximate = delta` and applies an `INCRBY delta` to the quota key. v0.1 ships the Lua-side approximation + write; the **sidecar reconciliation HTTP path is on the v0.2 backlog** (depends on the same HTTP bridge pattern as audit/diff/ner).
+**Reconciliation (per BR-SH-006).** The Lua side computes a fast approximate token count in `body_filter` and updates Redis quota immediately (write-then-correct pattern). When the sidecar has the response body it computes `exact - approximate = delta` and applies an `INCRBY delta` to the quota key. v0.1 ships the Lua-side approximation + write; the **sidecar reconciliation HTTP path is on the v0.2 backlog** (depends on the same HTTP bridge pattern as diff/ner per ADR-008).
 
 ### 5.3.1 Tokenizer Fallback Chain (Karar A locked 2026-04-22, Karar B open)
 
@@ -1332,10 +1342,9 @@ end
 -- Async audit event (Lua → Redis list `aria:audit_buffer`)
 function _M.record_audit_event(ctx, event_type, details)
     -- Mask PII in details before pushing
-    -- v0.1 GAP: sidecar consumer not implemented — events accumulate
-    -- in Redis with 1h TTL and are silently dropped without DB write.
-    -- v0.2 fix: AuditFlusher Spring @Scheduled bean OR POST /v1/audit/event
-    -- bridge per ADR-008. See HLD §8.3 + FINDING-003.
+    -- Sidecar `audit/AuditFlusher` (Spring @Scheduled, ADR-009) drains
+    -- this list via LPOP every 5s (configurable) and persists to the
+    -- `audit_events` table. Closed FINDING-003 in aria-runtime@d487026.
 end
 
 return _M
@@ -1638,13 +1647,13 @@ Unifying them in v0.2 has been considered (open question) — for now, both exis
 | BR-SH-012 | 2.2 | `scan_pii_in_prompt()`, `mask_pii_in_request()` | Shield e2e: PII | Shipped |
 | BR-SH-013 (data exfiltration guard) | — | — | — | **DEFERRED v0.3** — enterprise CISO |
 | BR-SH-014 (system prompt extraction guard) | — | — | — | **DEFERRED v0.3** — enterprise CISO |
-| BR-SH-015 | 2.4 | `record_audit_event()` (Lua, pushes to Redis) + `PostgresClient.insertAuditEvent()` (Java, **0 callers**) | Sidecar e2e: audit | **PARTIAL — Lua side wired; sidecar consumer NOT IMPLEMENTED in v0.1 (FINDING-003).** v0.2 fix per HLD §8.3. |
+| BR-SH-015 | 2.4 | `record_audit_event()` (Lua, pushes to Redis) + `audit/AuditFlusher` Spring `@Scheduled` LPOP drain → `PostgresClient.insertAuditEvent()` | Sidecar e2e: audit + `AuditFlusherTest` | **Implemented end-to-end (closed 2026-04-25, `aria-runtime@d487026`, ADR-009).** |
 | BR-SH-018 | 2.2 | `apply_model_pin()` | Shield e2e: model pin | Shipped |
 | BR-MK-001 | 3.2 | `_M.body_filter()` JSONPath rules | Mask e2e: JSONPath | Shipped |
 | BR-MK-002 | 3.2 | `resolve_role_policy()` | Mask e2e: roles | Shipped |
 | BR-MK-003 | 3.2, 7 | `detect_pii_patterns()`, `aria-pii.lua` | Unit: PII regex | Shipped (8 patterns including PAN scope-hygiene per HLD §10.2) |
 | BR-MK-004 | 3.3 | `apply_mask_strategy()`, `mask_strategies.*` | Unit: 12 strategies | Shipped — *`tokenize` strategy currently emits non-reversible hash; Redis-backed reversible tokens reserved for v0.2 (HLD §9.1)* |
-| BR-MK-005 | 3.2 | `_M.log()` masking audit | Mask e2e: audit | **PARTIAL — same gap as BR-SH-015** (Lua emits, sidecar does not consume) |
+| BR-MK-005 | 3.2 | `_M.log()` masking audit | Mask e2e: audit | **Implemented end-to-end** — closed alongside BR-SH-015 by `audit/AuditFlusher` (same Redis buffer, same sidecar drain, ADR-009) |
 | BR-MK-006 | 3.4 | `try_sidecar_ner`, `collect_ner_candidates`, `assign_entities_to_parts` (Lua) + `MaskController` + `NerDetectionService` + 7 supporting NER classes (Java) | Mask e2e: NER fail-open/fail-closed | Shipped 2026-04-24 — engine code community; multilingual model artefacts operator-supplied or enterprise DPO bundled |
 | BR-MK-007 (advanced policy semantics) | — | — | — | **DEFERRED v0.3** |
 | BR-MK-008 (DLP-style outbound mask) | — | — | — | **DEFERRED v0.3** — enterprise DPO |
@@ -1661,8 +1670,11 @@ Unifying them in v0.2 has been considered (open question) — for now, both exis
 
 **v1.0 → v1.1 changes to traceability:** Added BR-SH-008, BR-SH-009, BR-SH-018, BR-CN-005, BR-CN-006, BR-CN-007, BR-MK-006. Added "v0.1 Status" column. Marked BR-SH-011 sidecar tier, BR-SH-013/014, BR-MK-007/008 as v0.3 deferred (enterprise scope per HLD §14). Acknowledged audit pipeline gap (BR-SH-015, BR-MK-005). Renamed `TokenCounter.countTokens` to `TokenEncoder.count` per shipped class names.
 
+**v1.1 → v1.1.1 changes to traceability:** **BR-SH-015 + BR-MK-005 status flipped PARTIAL → Implemented end-to-end** following the audit pipeline closure in `aria-runtime@d487026` (`audit/AuditFlusher` Spring `@Scheduled` LPOP drain). Decision rationale (LPOP polling vs HTTP bridge) recorded in ADR-009. No business rules added or removed.
+
 ---
 
-*Document Version: 1.1 | Created: 2026-04-08 | Revised: 2026-04-25*
-*Status: v1.1 Draft — Pending Human Approval (after PHASE_REVIEW_2026-04-25 adversarial drift report)*
+*Document Version: 1.1.1 | Created: 2026-04-08 | Revised: 2026-04-25 (v1.1 spec freeze, then v1.1.1 audit-pipeline closure)*
+*Status: v1.1.1 Draft — Pending Human Approval (PHASE_REVIEW_2026-04-25 adversarial drift report sweep + audit pipeline closure)*
 *Change log v1.0 → v1.1: §1 plugin tree (real layout, ariactl deferred, no aria-grpc.lua, +aria-circuit-breaker.lua, real Java class roster), §2.5 internal-functions table (audit gap + sidecar stub status notes), §3.4 NEW (NER bridge BR-MK-006), §4.4 NEW (control_api admin endpoints BR-CN-005), §5.1 class hierarchy (shipped reality — ShieldServiceImpl + TokenEncoder, 8 NER classes, DiffController/MaskController), §5.2 (gRPC forward-compat only) + §5.2.1 NEW (HTTP bridges per ADR-008), §5.3 (TokenEncoder real impl with jtokkit), §5.3.1 NEW (Karar A cl100k_base fallback chain + Karar B open), §5.4 (HTTP+gRPC drain, no UDS file deletion), §6 (HTTP not gRPC, audit gap acknowledgement), §8 NEW (aria-circuit-breaker shared lib design), renumbered §9-§12, §10 added HTTP bridge perf row, §11 (test counts updated, ariactl deferred), §12 traceability rewrite (BR-MK-006 + BR-CN-005-007 + BR-SH-018/008/009 added; v0.1 Status column).*
+*Change log v1.1 → v1.1.1: §1 file roster + §5.1 class hierarchy now show `audit/AuditFlusher`. §2.5 `record_audit_event()` row + §6 Lua function comment + §12 BR-SH-015/BR-MK-005 traceability rows flipped to closed-state. §5.2.1 bridge endpoint conventions clarify that audit does NOT use the HTTP bridge pattern (per ADR-009). §5.3 token reconciliation reference to "audit/diff/ner" trimmed to "diff/ner". Test count 121 → 128. Decision recorded in NEW ADR-009 (LPOP polling chosen over HTTP bridge; Levent's "neden iki path?" pushback cited).*

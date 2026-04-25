@@ -2,8 +2,8 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 4 — Low-Level Design
-**Version:** 1.0
-**Date:** 2026-04-08
+**Version:** 1.1.1
+**Date:** 2026-04-25 (v1.1.1 audit-pipeline closure); 2026-04-25 (v1.1 spec freeze); 2026-04-08 (v1.0 baseline)
 **Source:** EXCEPTION_CODES.md v1.0 (Phase 2), ERROR_HANDLING_GUIDELINE.md v3.0, OBSERVABILITY_GUIDELINE.md v4.0
 
 ---
@@ -160,7 +160,8 @@ In v0.1, Lua plugins reach the sidecar via **HTTP/JSON over loopback TCP** (per 
 | `ARIA_RT_HANDLER_NOT_FOUND` | 404 / UNIMPLEMENTED (12) | VAL | WARN | Not retryable | Requested HTTP path or gRPC method not registered in sidecar | BR-RT-001 | US-S01 |
 | `ARIA_RT_DEPENDENCY_UNAVAILABLE` | 503 / UNAVAILABLE (14) | EXT | ERROR | Retry after recovery | Sidecar dependency (Redis/Postgres) unreachable | BR-RT-003 | US-S03 |
 | `ARIA_RT_TOKENIZER_FALLBACK` | (informational, no HTTP error) | INF | INFO | n/a | **Karar A:** model unknown to jtokkit registry; falling back to `cl100k_base` with `Accuracy.FALLBACK` flag. Emitted as metric counter for billing reconciliation; not a request-failing condition. See LLD §5.3.1. | BR-SH-006 | US-A06 |
-| `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` | (informational, v0.1 limitation) | INF | WARN at startup | n/a | **v0.1 known gap (FINDING-003):** `PostgresClient.insertAuditEvent` exists but no consumer of `aria:audit_buffer` Redis list. Events accumulate and TTL out without DB write. v0.2 fix: implement `AuditFlusher` Spring `@Scheduled` bean OR add `POST /v1/audit/event` HTTP bridge (preferred per ADR-008 pattern). See HLD §8.3. | BR-SH-015, BR-MK-005 | US-S04, US-B05 |
+
+> **Retired in v1.1.1:** `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` (formerly registered as the v0.1 FINDING-003 gap marker). The audit pipeline was closed in `aria-runtime@d487026` via `audit/AuditFlusher` (Spring `@Scheduled` LPOP drain — see ADR-009). Operators monitor audit health via `AuditFlusher.persistedTotal` / `failedTotal` counters (Prometheus); no error code is emitted by the closed pipeline. Future failure-mode codes (e.g., `ARIA_RT_AUDIT_FLUSHER_DEGRADED`) will be added on demand if operator feedback requires distinct codes beyond the metric-based signal.
 
 ### 3.5 System-Wide (ARIA_SYS_*)
 
@@ -762,7 +763,8 @@ spec:
 
 ---
 
-*Document Version: 1.1 | Created: 2026-04-08 | Revised: 2026-04-25*
+*Document Version: 1.1.1 | Created: 2026-04-08 | Revised: 2026-04-25 (v1.1 spec freeze, then v1.1.1 audit-pipeline closure)*
 *Source: EXCEPTION_CODES.md v1.0, ERROR_HANDLING_GUIDELINE.md v3.0, OBSERVABILITY_GUIDELINE.md v4.0*
-*Status: v1.1 Draft — Pending Human Approval (after PHASE_REVIEW_2026-04-25)*
+*Status: v1.1.1 Draft — Pending Human Approval (PHASE_REVIEW_2026-04-25 sweep + audit pipeline closure)*
 *Change log v1.0 → v1.1: §3.2 added 3 NER bridge codes (`ARIA_MK_NER_SIDECAR_UNAVAILABLE`, `ARIA_MK_NER_FAIL_CLOSED_REDACTED`, `ARIA_MK_NER_CIRCUIT_OPEN`); §3.3 added 2 shadow diff codes (`ARIA_CN_SHADOW_DIFF_UNAVAILABLE`, `ARIA_CN_SHADOW_BRIDGE_TIMEOUT`); §3.4 reframed transport (UDS gRPC → HTTP/loopback per ADR-008) + 2 new codes (`ARIA_RT_TOKENIZER_FALLBACK` for Karar A, `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` for FINDING-003 v0.1 gap). Total 78 → 85 codes. **Full source-vs-doc reconciliation grep deferred to v0.2** — known additions captured here are those introduced by 2026-04-22..24 ship rounds.*
+*Change log v1.1 → v1.1.1: §3.4 retired `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` following audit pipeline closure (`aria-runtime@d487026`, ADR-009). Total 85 → 84 codes. Operators monitor audit health via `AuditFlusher.persistedTotal` / `failedTotal` Prometheus counters instead. No new codes added; future audit failure-mode codes (e.g., `ARIA_RT_AUDIT_FLUSHER_DEGRADED`) deferred to operator-feedback-driven addition.*

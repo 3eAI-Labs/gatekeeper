@@ -2,11 +2,12 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 4 — Low-Level Design
-**Version:** 1.1
-**Date:** 2026-04-25 (revised); 2026-04-08 (v1.0 baseline)
+**Version:** 1.1.1
+**Date:** 2026-04-25 (v1.1.1 audit-pipeline closure); 2026-04-25 (v1.1 spec freeze); 2026-04-08 (v1.0 baseline)
 **Author:** AI Architect + Human Oversight
-**Input:** HLD.md v1.1
+**Input:** HLD.md v1.1.1
 **v1.1 Driver:** PHASE_REVIEW_2026-04-25 FINDING-005 — DDL is correct and matches the Flyway migrations in `db/migration/V001..V003.sql`, but the sidecar has no Flyway runner wired (auto-bootstrap missing); see §1.2.
+**v1.1.1 Driver:** §1.2 audit-pipeline status row updated — FINDING-003 closed in `aria-runtime@d487026` (`audit/AuditFlusher`, ADR-009). v0.2 fix item §2 retired; remaining v0.2 fix is §1 (Flyway in sidecar) and §3 (table-presence readiness check).
 
 ---
 
@@ -28,12 +29,12 @@ PostgreSQL holds append-only audit tables partitioned by month. The Java sidecar
 **Migration execution path in v0.1:**
 - ✅ Helm chart ships `runtime/helm/aria-gatekeeper/templates/migration-job.yaml` — a Flyway one-shot Job that runs the V001..V003 SQL files against the configured Postgres before the sidecar Deployment is rolled.
 - ❌ **Sidecar (`aria-runtime`) does NOT include a Flyway runner.** The `application.yml` does not declare `spring.flyway.*`, no Flyway dependency is in `build.gradle.kts`. If the Helm migration Job is skipped (e.g., docker-compose dev), the destination tables do not exist.
-- ❌ **Audit pipeline downstream of the migration is also broken** — even if tables exist, `PostgresClient.insertAuditEvent()` has zero callers in v0.1 (FINDING-003 / HLD §8.3 / LLD §6). Lua-side `record_audit_event` pushes events to Redis list `aria:audit_buffer` and they TTL out without being persisted.
+- ✅ **Audit pipeline downstream of the migration is closed (v1.1.1).** `audit/AuditFlusher` Spring `@Scheduled` LPOP drain (ADR-009) consumes `aria:audit_buffer` and persists to `audit_events`. If the migration is skipped and the table does not exist, `AuditFlusher.failedTotal` increments + ERROR-logs on every drained event — surfacing the missing-table gap rather than silently dropping events as before.
 
 **v0.2 fix items (tracked):**
 1. Add Flyway dependency + `spring.flyway.locations` config to `aria-runtime/build.gradle.kts` and `application.yml` so sidecar startup applies migrations idempotently. *(Closes the dev-stack gap.)*
-2. Implement `AuditFlusher` (Spring `@Scheduled`) OR add `POST /v1/audit/event` HTTP bridge per ADR-008 (preferred) so Redis-buffered audit events reach `audit_events`.
-3. Add a sidecar startup readiness check that verifies `audit_events` table presence; sidecar should fail readiness if the table is missing — current behavior of "start successfully and silently drop audits" must end.
+2. ✅ **Done in v1.1.1** — `audit/AuditFlusher` Spring `@Scheduled` LPOP drain implemented per ADR-009 (Karar A chosen over the `POST /v1/audit/event` HTTP bridge alternative); Redis-buffered audit events now reach `audit_events`.
+3. Add a sidecar startup readiness check that verifies `audit_events` table presence; sidecar should fail readiness if the table is missing. (Current `AuditFlusher` ERROR-logs on missing table — but readiness probe still reports OK; tightening this is the v0.2 task.)
 
 ### 1.1 Schema Name
 
@@ -799,6 +800,8 @@ The three tables are independent -- no foreign key relationships exist between t
 
 ---
 
-*Document Version: 1.0 | Date: 2026-04-08*
+*Document Version: 1.1.1 | Created: 2026-04-08 | Revised: 2026-04-25 (v1.1 spec freeze, then v1.1.1 audit-pipeline closure)*
+*Change log v1.0 → v1.1: §1.2 NEW — migration pipeline status (FINDING-005); DDL itself unchanged.*
+*Change log v1.1 → v1.1.1: §1.2 audit-pipeline downstream row flipped to ✅ closed (`audit/AuditFlusher`, ADR-009); v0.2 fix item §2 retired (done in v1.1.1).*
 *Phase: 4 — Low-Level Design*
 *Status: Draft*
