@@ -11,11 +11,12 @@ uses for end-to-end tests. For Kubernetes, see
 ## What you get
 
 ```
-       ┌──────────┐    ┌──────────────┐    ┌──────────────┐
-client │  APISIX  │    │ aria-runtime │    │  Redis +     │
-──────▶│  + Lua   │◀──▶│   sidecar    │◀──▶│  PostgreSQL  │
-       │  plugins │UDS │              │    │              │
-       └──────────┘    └──────────────┘    └──────────────┘
+       ┌──────────┐         ┌──────────────┐    ┌──────────────┐
+client │  APISIX  │  HTTP   │ aria-runtime │    │  Redis +     │
+──────▶│  + Lua   │◀───────▶│   sidecar    │◀──▶│  PostgreSQL  │
+       │  plugins │loopback │ (127.0.0.1   │    │              │
+       │          │         │   :8081)     │    │              │
+       └──────────┘         └──────────────┘    └──────────────┘
             │
             ▼
         upstream LLM

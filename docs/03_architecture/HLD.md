@@ -2,10 +2,11 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 3 — Architecture
-**Version:** 1.0
-**Date:** 2026-04-08
-**Author:** AI Architect + Human Oversight
+**Version:** 1.1
+**Date:** 2026-04-25 (revised); 2026-04-08 (v1.0 baseline)
+**Author:** AI Architect + Human Oversight (PO: Levent Sezgin Genç)
 **Input:** BUSINESS_LOGIC.md v1.0, DECISION_MATRIX.md v1.0, EXCEPTION_CODES.md v1.0
+**v1.1 Driver:** PHASE_REVIEW_2026-04-25 adversarial drift report — 6 critical, 7 major, 2 minor findings; HLD reconciled to actual shipped state (HTTP bridge over gRPC, mask NER, shadow diff, license-tier reframe, PCI-DSS scope-hygiene reframe).
 
 ---
 
@@ -36,12 +37,13 @@
 │  │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘              │  │
 │  │         │                 │                 │                      │  │
 │  │         └────────────┬────┴────────────┬────┘                      │  │
-│  │                      │  gRPC / UDS     │                           │  │
-│  │              ┌───────▼─────────────────▼───────┐                   │  │
-│  │              │   Java 21 Sidecar (Aria Runtime) │                   │  │
-│  │              │   • Shield handlers              │                   │  │
-│  │              │   • Mask handlers                │                   │  │
-│  │              │   • Canary handlers              │                   │  │
+│  │                      │  HTTP/JSON      │                           │  │
+│  │                      │  (loopback TCP) │   (ADR-008 supersedes     │  │
+│  │              ┌───────▼─────────────────▼───────┐  ADR-003 for      │  │
+│  │              │   Java 21 Sidecar (Aria Runtime) │  Lua transport)  │  │
+│  │              │   • Shield: TokenEncoder (real)  │                   │  │
+│  │              │   • Mask: NER pipeline (real)    │                   │  │
+│  │              │   • Canary: DiffEngine (real)    │                   │  │
 │  │              └───────┬─────────────────┬───────┘                   │  │
 │  └──────────────────────┼─────────────────┼──────────────────────────┘  │
 │                         │                 │                              │
@@ -82,8 +84,8 @@ Since Aria is an APISIX plugin suite (not a standalone microservice), the standa
 | Tracing | OpenTelemetry → Jaeger | OTel spans for sidecar gRPC calls | — |
 | Database | PostgreSQL 18.1+ | Central Postgres for audit/billing | — |
 | Cache | Redis Cluster | Central Redis for quotas, tokens, state | — |
-| Message Queue | Kafka (KRaft) | Not used in v1.0 — all communication is synchronous (gRPC/UDS) or fire-and-forget | ADR-006 |
-| Frontend | React 18 + Refine | Deferred — Grafana dashboards + ariactl CLI for v1.0 | ADR-007 |
+| Message Queue | Kafka (KRaft) | Not used in v1.0 — all Lua↔sidecar communication is synchronous HTTP/JSON over loopback or fire-and-forget | ADR-006 |
+| Frontend | React 18 + Refine | Deferred — Grafana dashboards for v1.0; **ariactl CLI deferred to v0.2** | ADR-007 |
 
 ### 2.2 Deployment Topology
 
@@ -98,11 +100,15 @@ Since Aria is an APISIX plugin suite (not a standalone microservice), the standa
 │  │  └── Port 9091 (Prometheus metrics)                  │  │
 │  │                                                      │  │
 │  │  Container 2: Aria Runtime (Java 21 Sidecar)         │  │
-│  │  ├── gRPC over /var/run/aria/aria.sock (UDS)         │  │
-│  │  ├── Port 8081 (/healthz, /readyz)                   │  │
+│  │  ├── HTTP/JSON on 127.0.0.1:8081                     │  │
+│  │  │   (POST /v1/diff, POST /v1/mask/detect,           │  │
+│  │  │    GET /healthz, /readyz, /actuator/*)            │  │
+│  │  ├── gRPC server on 127.0.0.1:8082 (forward-compat,  │  │
+│  │  │   no Lua callers — see ADR-008)                   │  │
 │  │  └── Memory: 256MB-512MB, CPU: 0.5-1.0              │  │
 │  │                                                      │  │
-│  │  Shared Volume: /var/run/aria/ (UDS socket)          │  │
+│  │  NetworkPolicy: ingress to :8081/:8082 from APISIX   │  │
+│  │  container only (same-pod loopback bind)             │  │
 │  └──────────────────────────────────────────────────────┘  │
 │                                                            │
 │  ┌─────────── External Services ───────────────────────┐  │
@@ -120,13 +126,16 @@ Since Aria is an APISIX plugin suite (not a standalone microservice), the standa
 |-------|-----------|---------|-----------|-----|
 | Plugin runtime | Lua 5.1 / LuaJIT (OpenResty) | APISIX-bundled | Zero overhead, Nginx event loop | ADR-002 |
 | Heavy processing | Java 21 (Virtual Threads) | 21 LTS | Concurrent AI requests, NLP/NER, tiktoken | ADR-002 |
-| IPC | gRPC over Unix Domain Socket | gRPC 1.60+ | ~0.1ms latency, no TCP overhead | ADR-003 |
+| Lua↔sidecar IPC | HTTP/JSON over loopback TCP (127.0.0.1:8081) | resty.http | < 5ms P95; chosen over gRPC/UDS for zero-Lua-binding simplicity | **ADR-008** (supersedes ADR-003) |
+| Sidecar-internal gRPC (forward-compat) | gRPC 1.60+ | for future non-Lua callers | not on Lua hot path in v0.1 | ADR-003 (superseded for Lua transport) |
 | Quota/state store | Redis 7+ (Cluster) | 7.2+ | Sub-ms reads for pre-flight checks | ADR-004 |
 | Audit/billing store | PostgreSQL 18.1+ | 18.1+ | ACID, immutable audit trail | ADR-004 |
 | High-perf masking | WASM (Rust) | Optional | Complex patterns at scale | ADR-005 |
 | Metrics | Prometheus (`aria_*`) | — | Native APISIX integration | — |
 | Dashboards | Grafana (JSON provisioning) | 10+ | Pre-built, zero manual setup | — |
-| CLI | ariactl (Go or Java native) | — | APISIX Admin API wrapper | — |
+| CLI | ariactl (Go) | **DEFERRED to v0.2** | APISIX Admin API wrapper; v0.1 substitute = direct Admin API + canary `_M.control_api()` endpoints | ADR-007 |
+| Build | Gradle 9.4.1, Java toolchain 21 | sidecar build | — | — |
+| Notable libs | jtokkit (cl100k_base fallback / Karar A), DJL HuggingFace, OpenNLP, Lettuce, R2DBC, Spring Boot 3.x | — | — | — |
 
 ---
 
@@ -211,7 +220,8 @@ Dynamic data masking in API responses — field-level JSONPath masking with role
 2. Role-based policy resolution (BR-MK-002)
 3. PII pattern regex detection (BR-MK-003)
 4. Configurable mask strategies (BR-MK-004)
-5. Masking audit event recording (BR-MK-005)
+5. Masking audit event recording (BR-MK-005) — *Lua side wired; sidecar consumer not yet implemented in v0.1, see §8.3*
+6. NER-backed PII detection via sidecar HTTP bridge (BR-MK-006) — pluggable multi-engine pipeline (OpenNLP English + DJL HuggingFace Turkish/multilingual); engine code is community tier, model artefacts are operator-supplied (slim image) or enterprise tier (bundled multilingual)
 
 **Internal Dependencies:**
 - Redis: Tokenization store (for `tokenize` strategy)
@@ -307,77 +317,89 @@ Intelligent progressive delivery — configurable canary schedules with automati
 
 ### 3.4 Aria Runtime (Java 21 Sidecar)
 
-**Tech Stack:** Java 21 (Virtual Threads, ScopedValue), gRPC, Spring Boot 3.x or Micronaut
-**Deployment:** Sidecar container in APISIX pod
+**Tech Stack:** Java 21 (Virtual Threads, ScopedValue), Spring Boot 3.x, gRPC (forward-compat only — see ADR-008), HTTP/JSON over loopback TCP (canonical Lua transport).
+**Build:** Gradle 9.4.1, Java toolchain 21.
+**Notable libraries:** jtokkit (tiktoken Java port, cl100k_base fallback per Karar A), DJL HuggingFace tokenizers + ONNX Runtime (NER), OpenNLP (English NER), Lettuce (Redis async), R2DBC (Postgres async).
+**Deployment:** Sidecar container in APISIX pod; binds to `127.0.0.1:8081`.
 **Base Package:** `com.eai.aria.runtime`
 
 **Primary Responsibility:**
-Heavy-computation backend for Lua plugins — prompt analysis, exact token counting, NER-based PII detection, shadow response diff engine. All operations are non-blocking with virtual threads.
+Heavy-computation backend for Lua plugins — exact token counting, NER-based PII detection, shadow response diff engine. All operations are non-blocking with virtual threads. Vector-similarity prompt-injection analysis and content-filter moderation are **stubbed in v0.1** (return safe defaults) and slated for v0.3.
 
-**Module Structure:**
+**Module Structure (shipped reality, 2026-04-25):**
 
 ```
 aria-runtime/
-├── core/                    # gRPC server, health checks, lifecycle
-│   ├── GrpcServer.java      # UDS listener, handler registry
-│   ├── HealthController.java # /healthz, /readyz
-│   └── ShutdownManager.java # Graceful drain
-├── shield/                  # Shield module handlers
-│   ├── PromptAnalyzer.java  # Vector similarity injection detection
-│   ├── TokenCounter.java    # tiktoken-exact counting
-│   └── ContentFilter.java   # Response content moderation
-├── mask/                    # Mask module handlers
-│   └── NerDetector.java     # Named entity recognition
-├── canary/                  # Canary module handlers
-│   └── DiffEngine.java      # Shadow response comparison
-├── common/                  # Shared utilities
-│   ├── RedisClient.java     # Async Redis operations
-│   ├── PostgresClient.java  # Async Postgres operations
-│   └── RequestContext.java  # ScopedValue definitions
-└── proto/                   # gRPC service definitions
-    └── aria/sidecar/v1/
-        ├── shield.proto
-        ├── mask.proto
-        ├── canary.proto
-        └── health.proto
+├── AriaRuntimeApplication.java  # Spring Boot entry point
+├── core/                        # gRPC server, health, lifecycle
+│   ├── GrpcServer.java          # gRPC listener (forward-compat, no Lua callers)
+│   ├── GrpcExceptionInterceptor.java
+│   ├── HealthController.java    # /healthz, /readyz (HTTP)
+│   ├── ShutdownManager.java     # Graceful drain
+│   └── RequestContext.java      # ScopedValue definitions
+├── shield/                      # Shield handlers
+│   ├── ShieldServiceImpl.java   # gRPC stub: analyzePrompt + filterResponse return safe defaults (v0.3 enables real detection)
+│   └── TokenEncoder.java        # Real tiktoken via jtokkit; cl100k_base fallback for unknown models (Karar A)
+├── mask/                        # Mask handlers
+│   ├── MaskController.java      # HTTP @RestController — POST /v1/mask/detect (Lua-callable)
+│   ├── MaskServiceImpl.java     # gRPC stub (forward-compat; no Lua callers)
+│   └── ner/                     # Pluggable NER pipeline (BR-MK-006)
+│       ├── NerEngine.java
+│       ├── NerEngineRegistry.java
+│       ├── NerDetectionService.java   # Domain @Service shared by HTTP + gRPC
+│       ├── NerProperties.java
+│       ├── PiiEntity.java
+│       ├── CompositeNerEngine.java
+│       ├── OpenNlpNerEngine.java
+│       └── DjlHuggingFaceNerEngine.java
+├── canary/                      # Canary handlers
+│   ├── DiffController.java      # HTTP @RestController — POST /v1/diff (Lua-callable)
+│   ├── CanaryServiceImpl.java   # gRPC stub (forward-compat; no Lua callers)
+│   └── DiffEngine.java          # Domain @Service shared by HTTP + gRPC
+├── common/
+│   ├── AriaRedisClient.java     # Lettuce async Redis (was "RedisClient" in v1.0 spec)
+│   ├── PostgresClient.java      # R2DBC async Postgres — insertAuditEvent() exists, NO CALLER in v0.1 (see §5.4 + §8.3)
+│   └── AriaException.java
+├── config/
+│   └── AriaConfig.java          # uds-path, shutdown-grace-seconds, mask.ner.*
+└── (proto sources at src/main/proto/{shield,mask,canary,health}.proto)
 ```
 
-**gRPC Services Exposed:**
+**Cross-transport engine sharing (canonical pattern, ADR-008):** every domain `@Service` (`DiffEngine`, `NerDetectionService`, …) is injected into both an `@RestController` (HTTP, Lua-callable) and a `@GrpcService` impl (forward-compat). One source of truth for logic; transport is a thin wrapper.
 
-| Service | Methods | Module |
-|---------|---------|--------|
-| `ShieldService` | `AnalyzePrompt`, `CountTokens`, `FilterResponse` | Shield |
-| `MaskService` | `DetectPII` | Mask |
-| `CanaryService` | `DiffResponses` | Canary |
-| `HealthService` | `Check` | Core |
+**HTTP Endpoints (Lua-callable, canonical):**
+
+| Endpoint | Module | Purpose |
+|---|---|---|
+| `POST /v1/diff` | Canary | Shadow response structural diff |
+| `POST /v1/mask/detect` | Mask | NER PII detection |
+| `GET /healthz` | Core | Liveness |
+| `GET /readyz` | Core | Readiness (Redis + Postgres) |
+| `GET /actuator/*` | Core | Spring Boot metrics, info, health |
+
+**gRPC Services (forward-compat — no Lua callers in v0.1; retained for future non-Lua clients):**
+
+| Service | Methods | Status |
+|---|---|---|
+| `ShieldService` | `AnalyzePrompt` (stub), `CountTokens` (real), `FilterResponse` (stub) | Mixed — token counting real, prompt analysis/filter v0.3 |
+| `MaskService` | `DetectPII` | Real — delegates to `NerDetectionService` |
+| `CanaryService` | `DiffResponses` | Real — delegates to `DiffEngine` |
+| `HealthService` | `Check` | Real |
 
 **NFRs:**
-- Startup: < 3 seconds
-- Memory: 256MB base, 512MB max
+- Startup: < 5 seconds (relaxed from v1.0's 3s due to NER engine warm-up)
+- Memory: 256MB base, 512MB max (add ~150MB if Turkish-BERT ONNX loaded — see `runtime/docs/NER_MODELS.md`)
 - Concurrent virtual threads: 10K+
-- gRPC round-trip (UDS): < 0.5ms
+- HTTP round-trip (loopback TCP): < 5ms (P95) — see ADR-008 for the gRPC-UDS → HTTP/loopback supersession
 
 ---
 
-### 3.5 ariactl CLI
+### 3.5 ariactl CLI — DEFERRED to v0.2
 
-**Tech Stack:** Go (single binary) or Java native-image (GraalVM)
-**Deployment:** Standalone binary, distributed via GitHub releases
-
-**Primary Responsibility:**
-CLI wrapper around APISIX Admin API for Aria-specific operations.
-
-**Commands:**
-
-| Command | Description | APISIX API |
-|---------|-------------|------------|
-| `ariactl quota set` | Configure token/dollar quotas | PATCH route/consumer metadata |
-| `ariactl quota status` | Show current usage vs. budget | GET Redis state via Admin API ext |
-| `ariactl mask rules list` | List masking rules for a route | GET route metadata |
-| `ariactl canary status` | Show canary stage and error rates | GET Redis state via Admin API ext |
-| `ariactl canary promote` | Instantly promote to 100% | POST Admin API extension |
-| `ariactl canary rollback` | Instantly rollback to 0% | POST Admin API extension |
-| `ariactl pricing update` | Update model pricing table | PATCH global plugin metadata |
+**Status:** Deferred. Not shipped in v0.1.
+**Why deferred:** Quality-first scope. Operators in v0.1 use APISIX Admin API directly + the `_M.control_api()` admin endpoints exposed on the canary plugin (`/v1/plugin/aria-canary/{status|promote|rollback|pause|resume}/{route_id}`). A purpose-built CLI is desirable for DX but not on the v0.1 critical path.
+**v0.2 plan:** Single Go binary, ~4 commands at MVP (`quota status`, `canary status`, `canary promote`, `canary rollback`). Distributed via GitHub Releases.
+**v0.1 substitute:** Operator workflows documented in `docs/05_user/USER_GUIDE.md` use `curl` against the APISIX Admin API + the canary plugin control endpoints. See API_CONTRACTS §2.2-2.4 for the exact paths.
 
 ---
 
@@ -401,10 +423,13 @@ See `API_CONTRACTS.md` for full OpenAPI and gRPC specifications.
 
 | Interface | Protocol | Direction | Auth | Latency Target |
 |-----------|----------|-----------|------|---------------|
-| Lua Plugin ↔ Aria Runtime | gRPC over UDS | Bidirectional | File-system permissions (0660) | < 0.5ms |
+| Lua Plugin → Aria Runtime | **HTTP/1.1 + JSON over loopback TCP (127.0.0.1:8081)** | Outbound (request-response) | Loopback bind + APISIX-only NetworkPolicy (no app-layer auth — pod is trust boundary) | < 5ms (P95) |
+| Aria Runtime gRPC server | gRPC over loopback TCP (127.0.0.1:8082) | Forward-compat — no Lua callers in v0.1 | Loopback bind | n/a (unused on Lua hot path) |
 | Lua Plugin → Redis | TCP (TLS) | Outbound | Redis AUTH | < 2ms |
 | Aria Runtime → Redis | TCP (TLS) | Outbound | Redis AUTH | < 2ms |
 | Aria Runtime → PostgreSQL | TCP (TLS) | Outbound | User/password | < 5ms |
+
+See **ADR-008** for the rationale of HTTP/JSON over the originally-specified gRPC/UDS, and the threat-model implications of moving the sidecar listener from a UDS socket to a loopback-bound TCP port (§5.1, §5.4).
 
 ### 4.3 Error Response Standard
 
@@ -431,11 +456,15 @@ See `EXCEPTION_CODES.md` for the full catalog.
 ### 5.1 Trust Boundaries
 
 ```
-UNTRUSTED          │           TRUSTED (within APISIX)
+UNTRUSTED          │           TRUSTED (within APISIX pod)
                    │
 Client ────────────┤──── APISIX Consumer Auth ────── Lua Plugins
                    │                                      │
-                   │                                 UDS (local)
+                   │                          HTTP/JSON loopback
+                   │                          (127.0.0.1:8081 — bound
+                   │                           to loopback only;
+                   │                           NetworkPolicy restricts
+                   │                           ingress to APISIX pod)
                    │                                      │
                    │                               Aria Runtime
                    │                                  │       │
@@ -444,6 +473,8 @@ Client ────────────┤──── APISIX Consumer Auth 
 LLM Providers ─────┤──── API Key Auth ──────── Redis   Postgres
                    │
 ```
+
+**Trust boundary placement (post-ADR-008):** The pod itself is the trust boundary. Sidecar listens on `127.0.0.1` only — not externally routable. NetworkPolicy template in Helm chart restricts ingress to the same-pod APISIX container. This replaces the v1.0 "UDS file permissions (0660)" mechanism with "loopback bind + NetworkPolicy". Both achieve "no network exposure" in their respective threat models; the change is debugability + zero Lua native-binding code (see ADR-008 Rationale).
 
 ### 5.2 Authentication Model
 
@@ -474,11 +505,10 @@ Aria does NOT implement its own authentication. It relies entirely on APISIX's c
 | Data | Protection | Implementation |
 |------|-----------|----------------|
 | Provider API keys (L4) | Encrypted at rest, never logged | APISIX secrets vault integration |
-| Tokenization mappings (L4) | AES-256 encrypted in Redis | Application-level encryption |
-| Audit log payload excerpts (L3) | PII masked before storage | BR-SH-015, BR-MK-005 |
+| Audit log payload excerpts (L3) | PII masked before storage | BR-SH-015, BR-MK-005 — *Lua side calls `record_audit_event` (BR-SH-015); the sidecar consumer/persistence is **NOT YET WIRED in v0.1** (see §8.3 + PHASE_REVIEW FINDING-003). v0.2 implements `AuditFlusher`.* |
 | Redis quota data (L2) | TLS 1.3 in transit | Redis TLS configuration |
 | Postgres audit data (L2-L3) | TDE at rest, TLS 1.3 in transit | Database-level encryption |
-| gRPC/UDS traffic | File-system isolation | UDS — no network exposure |
+| Lua↔sidecar HTTP traffic | Loopback-bound (127.0.0.1) + NetworkPolicy | No network exposure within trusted pod boundary; see §5.1 + ADR-008 |
 
 ### 5.5 Threat Model (STRIDE)
 
@@ -493,7 +523,7 @@ Aria does NOT implement its own authentication. It relies entirely on APISIX's c
 | DoS via large request bodies | Denial of Service | All plugins | APISIX request body size limits + `max_body_size` config | APISIX + config |
 | Attacker extracts system prompts via LLM | Information Disclosure | Shield | Data exfiltration guard detects extraction patterns | BR-SH-014 |
 | Admin API key compromise | Elevation of Privilege | All modules | Admin API restricted to internal network. Key rotation policy | Network policy |
-| Sidecar process crash exposes data | Information Disclosure | Runtime | UDS socket cleaned up on shutdown. No persistent data in sidecar memory | BR-RT-004 |
+| Sidecar process crash exposes data | Information Disclosure | Runtime | Loopback TCP listener torn down on shutdown. No persistent data in sidecar memory. NetworkPolicy ensures no external pod could reach the listener even briefly | BR-RT-004 |
 
 ---
 
@@ -578,17 +608,30 @@ JSON structured logging to stdout (Loki-compatible):
 
 ### 6.3 Distributed Tracing
 
-OpenTelemetry spans for sidecar gRPC calls:
+OpenTelemetry spans for sidecar HTTP calls (post-ADR-008):
 
 ```
 [client request]
-  └── [apisix.aria-shield.access]         # Lua plugin phase
-       ├── [redis.quota_check]             # Redis pre-flight
-       └── [grpc.shield.analyze_prompt]    # Sidecar call
-            ├── [shield.regex_scan]
-            └── [shield.vector_similarity]
+  └── [apisix.aria-shield.access]              # Lua plugin phase
+       ├── [redis.quota_check]                  # Redis pre-flight
+       └── [shield.regex_scan]                  # Lua-side prompt regex (BR-SH-011 community)
+                                                # Note: vector-similarity branch is enterprise (CISO),
+                                                # `analyzePrompt` sidecar call is stub in v0.1
   └── [apisix.aria-shield.body_filter]
-       └── [grpc.shield.count_tokens]      # Async, off critical path
+       └── [http.sidecar.count_tokens]          # POST /v1/shield/count (async, off critical path)
+                                                # — TokenEncoder real, jtokkit / cl100k_base fallback
+
+[apisix.aria-mask.body_filter]
+  ├── [mask.regex_scan]                         # Lua-side PII regex (community)
+  └── [http.sidecar.detect_pii]                 # POST /v1/mask/detect (BR-MK-006)
+       ├── [ner.opennlp_engine]                 # English entities
+       └── [ner.djl_huggingface_engine]         # Turkish/multilingual entities
+
+[apisix.aria-canary.access]
+  └── [canary.routing_decision]                 # Lua-side weighted-random / consistent-hash split
+[apisix.aria-canary.log]
+  └── [http.sidecar.diff]                       # POST /v1/diff (BR-CN-007, async)
+       └── [diff.structural_compare]
 ```
 
 ### 6.4 Alerting Rules
@@ -643,7 +686,7 @@ OpenTelemetry spans for sidecar gRPC calls:
 |----------|--------|-------------|
 | **Startup time** | < 3 seconds | Container startup metric |
 | **Memory footprint** | 256MB base, 512MB max | JVM memory metrics |
-| **gRPC round-trip (UDS)** | < 0.5ms | gRPC client metrics |
+| **HTTP round-trip (loopback TCP)** | < 5ms (P95) | Sidecar HTTP server timing — see ADR-008 |
 | **Concurrent virtual threads** | 10K+ | JVM metrics |
 | **Graceful shutdown** | < 30 seconds | Deployment rollout |
 | **Health check latency** | < 10ms | HTTP probe timing |
@@ -679,14 +722,21 @@ OpenTelemetry spans for sidecar gRPC calls:
 ### 8.3 PostgreSQL Failure
 
 **Detection:** Connection timeout or refused.
-**Impact:** Audit events not persisted (buffered in Redis).
-**Response:**
-1. Buffer audit events in Redis (max 1000, FIFO)
-2. Background flush job retries every 5 seconds
+**Designed impact:** Audit events buffered in Redis until PG returns; background flush job retries every 5 seconds; buffer overflow drops oldest and emits `aria_audit_buffer_overflow`.
+**Designed response:**
+1. Buffer audit events in Redis list `aria:audit_buffer` (max 1000, FIFO)
+2. `AuditFlusher` background job retries every 5 seconds
 3. If buffer exceeds 1000, drop oldest and emit `aria_audit_buffer_overflow`
 4. No impact on request pipeline (audit is async)
+5. Recovery: flush Redis buffer to Postgres on reconnection
 
-**Recovery:** Automatic — flush Redis buffer to Postgres on reconnection.
+**v0.1 reality (KNOWN GAP — PHASE_REVIEW FINDING-003):**
+- Lua side calls `aria_core.record_audit_event()` correctly — events ARE pushed onto Redis list `aria:audit_buffer`.
+- **Sidecar `AuditFlusher` is NOT IMPLEMENTED.** `PostgresClient.insertAuditEvent()` exists but has zero callers. There is no scheduled job, no HTTP endpoint, no gRPC RPC consuming the Redis list.
+- **Net effect in v0.1:** audit events accumulate in the Redis list with the configured 1h TTL and are silently dropped. `audit_events` table receives no inserts. BR-SH-015 / BR-MK-005 are not durably implemented despite Lua-side wiring.
+- **v0.2 plan:** Implement `AuditFlusher` Spring `@Scheduled` bean (BLPOP every 5s) **or** add `POST /v1/audit/event` HTTP bridge per ADR-008 pattern (preferred). Add Flyway `V001__create_audit_events.sql` migration so the destination table exists. Add startup readiness check that confirms `audit_events` table presence — sidecar should fail readiness if table missing.
+
+**Recovery (after v0.2 fix):** Automatic — flush Redis buffer to Postgres on reconnection.
 
 ### 8.4 LLM Provider Failure
 
@@ -728,7 +778,7 @@ OpenTelemetry spans for sidecar gRPC calls:
 | `aria:canary:{route}` | HASH (JSON) | Canary | none (persistent) |
 | `aria:canary:errors:{route}:{version}:{window}` | STRING (int) | Canary | 2m |
 | `aria:canary:latency:{route}:{version}` | SORTED_SET | Canary | 10m |
-| `aria:tokenize:{token_id}` | STRING (encrypted) | Mask | configurable |
+| `aria:tokenize:{token_id}` | STRING (encrypted) | Mask | configurable | *Reserved for v0.2 reversible-tokenization strategy. Not active in v0.1; current `tokenize` mask strategy emits a non-reversible hash. See §10.2.* |
 | `aria:audit_buffer` | LIST | All | 1h |
 
 ### 9.2 PostgreSQL Schema (Conceptual)
@@ -770,14 +820,15 @@ OpenTelemetry spans for sidecar gRPC calls:
 | Breach notification | Incident response procedure — 72 hours (KVKK) |
 | Consent management | Application-level concern (not gateway) |
 
-### 10.2 PCI-DSS
+### 10.2 PCI-DSS Scope Hygiene
 
-| Requirement | Implementation |
-|-------------|----------------|
-| PAN never stored in full | Masking at gateway edge — `last4` or `tokenize` strategy |
-| Encryption in transit | TLS 1.3 for all external communication |
-| Access logging | Full audit trail for PAN access events |
-| Tokenization | Reversible tokens stored encrypted in Redis with TTL |
+**Framing:** Gatekeeper does **not** claim PCI-DSS compliance — that requires an audited cardholder-data environment which is the operator's responsibility. Gatekeeper provides controls that help operators **avoid accidental PCI-DSS scope creep** into the AI channel: PAN-shaped values appearing in user prompts are detected at the gateway edge and masked/blocked before egress to upstream LLM providers.
+
+| Capability | Implementation |
+|---|---|
+| PAN detection at prompt edge | `aria-pii.lua` regex + Luhn validation (`aria-mask` `auto_detect.patterns: [pan, ...]`) |
+| PAN egress prevention | Mask strategies (`last4`, `redact`, `mask:pan`) applied in `body_filter` phase before request leaves APISIX |
+| PCI-DSS audit boundary | Operator's responsibility — Gatekeeper does not maintain a PCI-DSS-compliant audit trail or cardholder-data environment |
 
 ---
 
@@ -850,15 +901,55 @@ git push → Lint (Lua + Java) → Unit Test → Build Sidecar Image →
 
 See `docs/03_architecture/ADR/` for detailed ADRs:
 
-| ADR | Title | Decision |
-|-----|-------|----------|
-| ADR-001 | Authentication delegation to APISIX | Aria trusts APISIX consumer identity, no own auth |
-| ADR-002 | Lua + Java hybrid architecture | Lua for fast path (< 5ms), Java sidecar for heavy processing |
-| ADR-003 | gRPC over Unix Domain Sockets for IPC | ~0.1ms latency vs ~1ms HTTP, no TCP overhead |
-| ADR-004 | Redis + PostgreSQL dual data store | Redis for real-time state, Postgres for audit/compliance |
-| ADR-005 | Optional WASM (Rust) masking engine | Progressive performance tier: Lua → WASM → Java |
-| ADR-006 | No Kafka in v1.0 | All IPC is synchronous gRPC/UDS or fire-and-forget. Kafka adds complexity without proportional benefit for plugin-to-sidecar communication |
-| ADR-007 | Grafana + ariactl instead of Admin UI | v1.0 ops via Grafana dashboards and CLI. Custom React/Refine UI deferred to post-v1.0 |
+| ADR | Title | Decision | Status |
+|-----|-------|----------|--------|
+| ADR-001 | Authentication delegation to APISIX | Aria trusts APISIX consumer identity, no own auth | Accepted |
+| ADR-002 | Lua + Java hybrid architecture | Lua for fast path (< 5ms), Java sidecar for heavy processing | Accepted |
+| ADR-003 | gRPC over Unix Domain Sockets for IPC | ~0.1ms latency vs ~1ms HTTP, no TCP overhead | **Superseded by ADR-008 (2026-04-25)** for the Lua↔sidecar transport |
+| ADR-004 | Redis + PostgreSQL dual data store | Redis for real-time state, Postgres for audit/compliance | Accepted |
+| ADR-005 | Optional WASM (Rust) masking engine | Progressive performance tier: Lua → WASM → Java | Accepted (deferred — Lua + Java sidecar covers v0.1 perf envelope) |
+| ADR-006 | No Kafka in v1.0 | All IPC is synchronous (HTTP/JSON loopback) or fire-and-forget. Kafka adds complexity without proportional benefit for plugin-to-sidecar communication | Accepted |
+| ADR-007 | Grafana + ariactl instead of Admin UI | v1.0 ops via Grafana dashboards. ariactl CLI deferred to v0.2 (see HLD §3.5). | Accepted (CLI portion deferred) |
+| ADR-008 | HTTP/JSON bridge supersedes gRPC-UDS for Lua-callable sidecar endpoints | All Lua↔sidecar calls use `resty.http` over `127.0.0.1:8081`. gRPC services retained as forward-compat for non-Lua callers. Cross-transport engine-sharing pattern canonical. | **Accepted (2026-04-25)** — supersedes ADR-003 for Lua transport |
+
+---
+
+## 14. Tiering & License Strategy
+
+Gatekeeper follows an **open-core** model with the enterprise tier organized by **buyer persona**, not by feature gates. This section formalizes the 2026-04-21 license refinement (see memory `project_license_split_refinement.md`).
+
+### 14.1 Open core — Apache 2.0
+
+**Public repo (`gatekeeper`):** all Lua plugins (`aria-shield`, `aria-mask`, `aria-canary`) + shared libraries (`aria-core`, `aria-pii`, `aria-quota`, `aria-mask-strategies`, `aria-provider`, `aria-circuit-breaker`).
+
+**Public Aria Runtime image (community sidecar):** `TokenEncoder` (jtokkit, real tiktoken counting), `DiffEngine` (shadow diff), `NerDetectionService` + 8 NER classes, all HTTP controllers (`MaskController`, `DiffController`), health/metrics endpoints.
+
+**Community-tier features include the FULL canary suite** (shadow diff + traffic shadowing + auto-rollback + manual override). Canary "Pro" was retired 2026-04-21; no enterprise Canary tier exists.
+
+### 14.2 Persona-gated enterprise (separate codebase, license-key gated)
+
+Enterprise features are **separate code**, not feature flags hidden in the open-core image. Grouped by buyer persona:
+
+| Persona | Enterprise capabilities |
+|---|---|
+| **Security (CISO)** | Vector-similarity prompt-injection detection (extends `ShieldServiceImpl.analyzePrompt` stub) · Continuously-updated injection corpus · Content-moderation pipeline (extends `ShieldServiceImpl.filterResponse` stub) |
+| **Privacy & Compliance (DPO)** | Multilingual NER model artefacts (TR/AR/EN; engine code is open core) · Tamper-proof audit log (WORM hash chain) · SOC2 / HIPAA / KVKK / GDPR export formats · Continuously-updated compliance mappings |
+| **Financial Governance (CFO)** | Chargeback reports · Multi-currency pricing · Tax-aware billing · Team/project cost attribution · Budget alerts with escalation workflows |
+
+The defensible moat is in **continuously-updated assets** (corpora, compliance mappings) and **persona-aligned budgets**, not in static feature gates.
+
+### 14.3 Tier mapping for shipped business rules (v0.1)
+
+| BR ID | Module | Tier |
+|---|---|---|
+| BR-SH-001 (multi-provider routing), -002 (circuit breaker), -003 (SSE), -004 (OpenAI compat), -005 (quota check), -006 (token counter — TokenEncoder), -007 (cost calc), -010 (overage policy), -011 regex branch (prompt injection — Lua side), -012 (PII in prompt), -015 (audit event — Lua side), -018 (model pin) | Shield | Community |
+| BR-SH-011 vector-similarity branch (sidecar), -013 (data exfiltration), -014 (system prompt extraction) | Shield | **Enterprise (CISO)** |
+| BR-MK-001 .. -005 + BR-MK-006 (NER bridge, engine code only) | Mask | Community |
+| BR-MK-006 (multilingual model artefacts), -007/-008 | Mask | **Enterprise (DPO)** |
+| BR-CN-001 .. -007 (full canary including shadow diff) | Canary | Community |
+| BR-RT-001 .. -004 (gRPC server, virtual threads, shutdown) | Runtime | Community |
+
+For a feature **not yet implemented** (e.g., advanced WORM audit log), the table above declares its intended tier so future contributors know which codebase to extend.
 
 ---
 
@@ -875,5 +966,6 @@ See `docs/03_architecture/ADR/` for detailed ADRs:
 
 ---
 
-*Document Version: 1.0 | Created: 2026-04-08*
-*Status: Draft — Pending Human Approval*
+*Document Version: 1.1 | Created: 2026-04-08 | Revised: 2026-04-25*
+*Status: v1.1 Draft — Pending Human Approval (after PHASE_REVIEW_2026-04-25 adversarial drift report)*
+*Change log v1.0 → v1.1: §1.2 boundary diagram (UDS→HTTP), §2.1/§2.2/§2.3 transport + ariactl deferral, §3.4 module structure (shipped reality), §3.5 ariactl deferred, §4.2 internal interfaces, §5.1 trust diagram, §5.4 audit gap acknowledgment, §6.3 tracing diagram, §7.4 NFR transport, §8.3 audit pipeline gap, §9.1 tokenize key reserved, §10.2 PCI-DSS scope-hygiene reframe, §13 ADR table (ADR-003 superseded, ADR-008 added), §14 Tiering & License (NEW)*

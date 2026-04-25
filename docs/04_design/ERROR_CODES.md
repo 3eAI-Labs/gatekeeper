@@ -131,6 +131,9 @@ Non-Shield errors use the standard API envelope from the API_DESIGN_GUIDELINE:
 | `ARIA_MK_MASKING_ENGINE_ERROR` | 500 | SYS | ERROR | Retry immediately | Internal error during response masking | BR-MK-001 | US-B01 |
 | `ARIA_MK_INVALID_JSONPATH` | 500 | SYS | ERROR | Not retryable | Configured JSONPath expression is invalid (configuration error) | BR-MK-001 | US-B01 |
 | `ARIA_MK_TOKENIZE_UNAVAILABLE` | 500 | SYS | ERROR | Retry after recovery | Redis unavailable for tokenization (fallback to redact) | BR-MK-004 | US-B04 |
+| `ARIA_MK_NER_SIDECAR_UNAVAILABLE` | (transparent — `fail_mode` dependent) | EXT | WARN | Retry per circuit breaker | NER sidecar (`POST /v1/mask/detect`) unreachable. `fail_mode=open` → fall through to regex-only masking (community default). `fail_mode=closed` → defensively redact all NER candidate fields (cannot return 503 from body_filter; see USER_GUIDE §5.4.1). | BR-MK-006 | US-B06 |
+| `ARIA_MK_NER_FAIL_CLOSED_REDACTED` | (transparent, informational) | INF | INFO | n/a | `fail_mode=closed` defensive redaction triggered because sidecar unavailable. Emitted as counter for ops dashboards. | BR-MK-006 | US-B06 |
+| `ARIA_MK_NER_CIRCUIT_OPEN` | (transparent, informational) | INF | WARN at threshold | n/a | NER bridge circuit breaker (per-route) is OPEN. Lua plugin skips sidecar calls until cooldown elapses. See LLD §8 for state machine. | BR-MK-006 | US-B06 |
 
 **Note:** Most Mask errors are transparent to the client. The response is either masked correctly or passed through with degraded masking. These codes are used for internal monitoring and logging only.
 
@@ -143,17 +146,21 @@ Non-Shield errors use the standard API envelope from the API_DESIGN_GUIDELINE:
 | `ARIA_CN_INVALID_SCHEDULE` | 400 | VAL | WARN | Not retryable | Canary schedule is malformed (percentages not ascending, last stage != 100%) | BR-CN-001 | US-C01 |
 | `ARIA_CN_ALREADY_PROMOTED` | 409 | BUS | WARN | Not retryable | Canary is already promoted to 100% | BR-CN-005 | US-C05 |
 | `ARIA_CN_ALREADY_ROLLED_BACK` | 409 | BUS | WARN | Not retryable | Canary is already rolled back to 0% | BR-CN-005 | US-C05 |
+| `ARIA_CN_SHADOW_DIFF_UNAVAILABLE` | (transparent, informational) | EXT | WARN | Skip diff for this request | Shadow diff sidecar (`POST /v1/diff`) unreachable. Shadow traffic still fired to upstream but no structural comparison computed for this request. Emitted as counter for ops dashboards. | BR-CN-007 | US-C07 |
+| `ARIA_CN_SHADOW_BRIDGE_TIMEOUT` | (transparent, informational) | EXT | WARN | Per circuit breaker | Shadow diff sidecar exceeded `shadow.sidecar.timeout_ms` (default 2000ms). Recorded as failure for the per-route circuit breaker (LLD §8). | BR-CN-007 | US-C07 |
 
 ### 3.4 Runtime / Sidecar (ARIA_RT_*)
 
-Runtime errors use gRPC status codes (the sidecar communicates with Lua plugins over Unix Domain Socket / gRPC).
+In v0.1, Lua plugins reach the sidecar via **HTTP/JSON over loopback TCP** (per ADR-008); these codes wrap HTTP failures plus internal sidecar conditions. The "gRPC equivalent" column reflects the gRPC status code returned by the forward-compat gRPC service-impl (API_CONTRACTS §3) — useful for ops watching both transports.
 
-| Code | gRPC Status | Category | Log Level | Retry Strategy | Description | Business Rule | User Story |
+| Code | HTTP / gRPC equivalent | Category | Log Level | Retry Strategy | Description | Business Rule | User Story |
 |---|---|---|---|---|---|---|---|
-| `ARIA_RT_SIDECAR_UNAVAILABLE` | UNAVAILABLE (14) | EXT | ERROR | Retry immediately | Sidecar process not running or UDS unreachable | BR-RT-001 | US-S01 |
-| `ARIA_RT_RESOURCE_EXHAUSTED` | RESOURCE_EXHAUSTED (8) | SYS | ERROR | Retry after delay (backoff) | Sidecar virtual thread pool exhausted | BR-RT-002 | US-S02 |
-| `ARIA_RT_HANDLER_NOT_FOUND` | UNIMPLEMENTED (12) | VAL | WARN | Not retryable | Requested gRPC method not registered in sidecar | BR-RT-001 | US-S01 |
-| `ARIA_RT_DEPENDENCY_UNAVAILABLE` | UNAVAILABLE (14) | EXT | ERROR | Retry after recovery | Sidecar dependency (Redis/Postgres) unreachable | BR-RT-003 | US-S03 |
+| `ARIA_RT_SIDECAR_UNAVAILABLE` | 502 / UNAVAILABLE (14) | EXT | ERROR | Retry immediately | Sidecar process not running or HTTP loopback (`127.0.0.1:8081`) unreachable | BR-RT-001 | US-S01 |
+| `ARIA_RT_RESOURCE_EXHAUSTED` | 503 / RESOURCE_EXHAUSTED (8) | SYS | ERROR | Retry after delay (backoff) | Sidecar virtual thread pool exhausted | BR-RT-002 | US-S02 |
+| `ARIA_RT_HANDLER_NOT_FOUND` | 404 / UNIMPLEMENTED (12) | VAL | WARN | Not retryable | Requested HTTP path or gRPC method not registered in sidecar | BR-RT-001 | US-S01 |
+| `ARIA_RT_DEPENDENCY_UNAVAILABLE` | 503 / UNAVAILABLE (14) | EXT | ERROR | Retry after recovery | Sidecar dependency (Redis/Postgres) unreachable | BR-RT-003 | US-S03 |
+| `ARIA_RT_TOKENIZER_FALLBACK` | (informational, no HTTP error) | INF | INFO | n/a | **Karar A:** model unknown to jtokkit registry; falling back to `cl100k_base` with `Accuracy.FALLBACK` flag. Emitted as metric counter for billing reconciliation; not a request-failing condition. See LLD §5.3.1. | BR-SH-006 | US-A06 |
+| `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` | (informational, v0.1 limitation) | INF | WARN at startup | n/a | **v0.1 known gap (FINDING-003):** `PostgresClient.insertAuditEvent` exists but no consumer of `aria:audit_buffer` Redis list. Events accumulate and TTL out without DB write. v0.2 fix: implement `AuditFlusher` Spring `@Scheduled` bean OR add `POST /v1/audit/event` HTTP bridge (preferred per ADR-008 pattern). See HLD §8.3. | BR-SH-015, BR-MK-005 | US-S04, US-B05 |
 
 ### 3.5 System-Wide (ARIA_SYS_*)
 
@@ -755,6 +762,7 @@ spec:
 
 ---
 
-*Document Version: 1.0 | Created: 2026-04-08*
+*Document Version: 1.1 | Created: 2026-04-08 | Revised: 2026-04-25*
 *Source: EXCEPTION_CODES.md v1.0, ERROR_HANDLING_GUIDELINE.md v3.0, OBSERVABILITY_GUIDELINE.md v4.0*
-*Status: Draft*
+*Status: v1.1 Draft — Pending Human Approval (after PHASE_REVIEW_2026-04-25)*
+*Change log v1.0 → v1.1: §3.2 added 3 NER bridge codes (`ARIA_MK_NER_SIDECAR_UNAVAILABLE`, `ARIA_MK_NER_FAIL_CLOSED_REDACTED`, `ARIA_MK_NER_CIRCUIT_OPEN`); §3.3 added 2 shadow diff codes (`ARIA_CN_SHADOW_DIFF_UNAVAILABLE`, `ARIA_CN_SHADOW_BRIDGE_TIMEOUT`); §3.4 reframed transport (UDS gRPC → HTTP/loopback per ADR-008) + 2 new codes (`ARIA_RT_TOKENIZER_FALLBACK` for Karar A, `ARIA_RT_AUDIT_PIPELINE_NOT_WIRED` for FINDING-003 v0.1 gap). Total 78 → 85 codes. **Full source-vs-doc reconciliation grep deferred to v0.2** — known additions captured here are those introduced by 2026-04-22..24 ship rounds.*

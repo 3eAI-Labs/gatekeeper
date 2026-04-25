@@ -2,81 +2,93 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 4 — Low-Level Design
-**Version:** 1.0
-**Date:** 2026-04-08
-**Input:** HLD.md v1.0, BUSINESS_LOGIC.md v1.0, DECISION_MATRIX.md v1.0
+**Version:** 1.1
+**Date:** 2026-04-25 (revised); 2026-04-08 (v1.0 baseline)
+**Input:** HLD.md v1.1, BUSINESS_LOGIC.md v1.0, DECISION_MATRIX.md v1.0
+**v1.1 Driver:** PHASE_REVIEW_2026-04-25 adversarial drift audit. Reconciles to shipped reality: HTTP bridge over gRPC for Lua transport (ADR-008), mask NER pipeline (BR-MK-006), canary admin control_api (BR-CN-005), shadow diff structural compare (BR-CN-007), `aria-circuit-breaker.lua` shared lib, audit pipeline gap acknowledgment, Karar A `cl100k_base` fallback, ariactl deferred.
 
 ---
 
 ## 1. Project Structure
 
 ```
-3e-aria-gatekeeper/
+3e-aria-gatekeeper/                  # Lua plugins repo (Apache 2.0, public)
 ├── apisix/
 │   └── plugins/
 │       ├── aria-shield.lua          # Module A: AI governance plugin
-│       ├── aria-mask.lua            # Module B: Data masking plugin
-│       ├── aria-canary.lua          # Module C: Progressive delivery plugin
+│       ├── aria-mask.lua            # Module B: Data masking plugin (incl. NER bridge)
+│       ├── aria-canary.lua          # Module C: Progressive delivery plugin (incl. control_api §4.4)
 │       └── lib/
-│           ├── aria-core.lua        # Shared utilities (Redis, metrics, config)
-│           ├── aria-provider.lua    # Provider transformation logic
+│           ├── aria-core.lua        # Shared utilities (Redis, metrics, audit buffer)
+│           ├── aria-provider.lua    # Provider transformation logic (5 LLM providers)
 │           ├── aria-pii.lua         # PII regex patterns (shared by Shield + Mask)
-│           └── aria-grpc.lua        # gRPC/UDS client wrapper
-├── wasm/
-│   └── aria-mask-engine/            # Optional Rust WASM masking engine
-│       ├── Cargo.toml
-│       └── src/lib.rs
-├── aria-runtime/                    # Java 21 sidecar
-│   ├── build.gradle.kts
-│   ├── src/main/java/com/eai/aria/runtime/
-│   │   ├── AriaRuntimeApplication.java
-│   │   ├── core/
-│   │   │   ├── GrpcServer.java
-│   │   │   ├── HealthController.java
-│   │   │   ├── ShutdownManager.java
-│   │   │   └── RequestContext.java
-│   │   ├── shield/
-│   │   │   ├── PromptAnalyzer.java
-│   │   │   ├── TokenCounter.java
-│   │   │   └── ContentFilter.java
-│   │   ├── mask/
-│   │   │   └── NerDetector.java
-│   │   ├── canary/
-│   │   │   └── DiffEngine.java
-│   │   ├── common/
-│   │   │   ├── RedisClient.java
-│   │   │   ├── PostgresClient.java
-│   │   │   └── AriaException.java
-│   │   └── config/
-│   │       └── AriaConfig.java
-│   ├── src/main/proto/
-│   │   └── aria/sidecar/v1/
-│   │       ├── shield.proto
-│   │       ├── mask.proto
-│   │       ├── canary.proto
-│   │       └── health.proto
-│   └── src/test/
-├── ariactl/                         # CLI tool
-│   ├── cmd/
-│   │   ├── root.go
-│   │   ├── quota.go
-│   │   ├── mask.go
-│   │   └── canary.go
-│   └── go.mod
-├── deploy/
-│   ├── helm/aria-gatekeeper/
-│   ├── dashboards/
-│   │   ├── shield-dashboard.json
-│   │   ├── mask-dashboard.json
-│   │   └── canary-dashboard.json
-│   └── alerting-rules.yaml
-├── db/
-│   └── migration/
-│       ├── V001__create_audit_events.sql
-│       ├── V002__create_billing_records.sql
-│       └── V003__create_masking_audit.sql
-└── docs/
+│           ├── aria-quota.lua       # Quota check / overage policy / cost calc
+│           ├── aria-mask-strategies.lua  # 12 masking strategies (last4, hash, redact, …)
+│           └── aria-circuit-breaker.lua  # NEW 2026-04-24 — generic per-endpoint breaker (ngx.shared.dict-backed); reused by mask NER bridge and (planned) all future Lua↔sidecar HTTP bridges. See §8.
+├── runtime/                         # Operator deployment artefacts (this repo)
+│   ├── apisix.yaml                  # Standalone YAML routes config
+│   ├── docker-compose.yaml
+│   ├── docs/{CONFIGURATION,DEPLOYMENT,NER_MODELS}.md
+│   ├── helm/aria-gatekeeper/        # Sidecar Helm chart (Chart.yaml, templates/, values.yaml)
+│   └── dashboards/                  # Grafana JSONs: shield, mask, canary
+├── docs/                            # Phase 1-6 deliverables (this repo)
+└── db/
+    └── migration/                   # Flyway-format SQL (auto-applied by migration-job in Helm chart, not by sidecar startup yet — see §5.4 + Phase 6 FINDING-005)
+        ├── V001__create_schema_and_enums.sql
+        ├── V002__create_billing_and_masking_tables.sql
+        └── V003__create_partitions_and_maintenance.sql
+
+aria-runtime/                        # Java 21 sidecar repo (proprietary, separate)
+├── build.gradle.kts                 # Gradle 9.4.1, toolchain Java 21
+├── src/main/java/com/eai/aria/runtime/
+│   ├── AriaRuntimeApplication.java  # Spring Boot @SpringBootApplication entry
+│   ├── core/
+│   │   ├── GrpcServer.java          # gRPC listener (forward-compat per ADR-008; no Lua callers in v0.1)
+│   │   ├── GrpcExceptionInterceptor.java
+│   │   ├── HealthController.java    # HTTP /healthz, /readyz
+│   │   ├── ShutdownManager.java     # SIGTERM grace drain
+│   │   └── RequestContext.java      # ScopedValue definitions
+│   ├── shield/
+│   │   ├── ShieldServiceImpl.java   # gRPC ShieldService — analyzePrompt + filterResponse are STUBS (return safe defaults; v0.3 enables real detection); countTokens delegates to TokenEncoder
+│   │   └── TokenEncoder.java        # REAL — jtokkit (cl100k_base fallback per Karar A); see §5.3 + §5.3.1
+│   ├── mask/
+│   │   ├── MaskController.java      # HTTP @RestController POST /v1/mask/detect (Lua-callable, ADR-008)
+│   │   ├── MaskServiceImpl.java     # gRPC MaskService.DetectPII — delegates to NerDetectionService; forward-compat
+│   │   └── ner/                     # NER pipeline (BR-MK-006), shipped 2026-04-24
+│   │       ├── NerEngine.java                # Interface
+│   │       ├── NerEngineRegistry.java        # Spring-injected List<NerEngine>; filtered by config
+│   │       ├── NerDetectionService.java      # Domain @Service shared by HTTP + gRPC
+│   │       ├── NerProperties.java            # @ConfigurationProperties for aria.mask.ner.*
+│   │       ├── PiiEntity.java                # Detected entity DTO
+│   │       ├── CompositeNerEngine.java       # Unions+dedupes results from registered engines
+│   │       ├── OpenNlpNerEngine.java         # English NER (Apache OpenNLP)
+│   │       └── DjlHuggingFaceNerEngine.java  # Multilingual ONNX (Turkish-BERT default, see runtime/docs/NER_MODELS.md)
+│   ├── canary/
+│   │   ├── CanaryServiceImpl.java   # gRPC CanaryService.DiffResponses — delegates to DiffEngine; forward-compat
+│   │   ├── DiffController.java      # HTTP @RestController POST /v1/diff (Lua-callable, ADR-008)
+│   │   └── DiffEngine.java          # REAL — structural diff (status, headers, body), shipped 2026-04-22 → 2026-04-23 across Iter 1+2+2c+3
+│   ├── common/
+│   │   ├── AriaRedisClient.java     # Lettuce async (was "RedisClient" in v1.0 spec)
+│   │   ├── PostgresClient.java      # R2DBC async — insertAuditEvent() exists but has 0 callers in v0.1 (FINDING-003)
+│   │   └── AriaException.java
+│   └── config/
+│       └── AriaConfig.java          # @ConfigurationProperties: uds-path, shutdown-grace-seconds, mask.ner.*
+├── src/main/proto/
+│   ├── shield.proto
+│   ├── mask.proto
+│   ├── canary.proto
+│   └── health.proto
+└── src/test/                        # JUnit 5: 121 tests as of 2026-04-24
+
+ariactl/                              # DEFERRED to v0.2 (HLD §3.5, ADR-007). Directory does not exist in v0.1; v0.1 substitute = APISIX Admin API + canary control_api endpoints (§4.4).
 ```
+
+**Differences vs v1.0 plan worth noting:**
+- `aria-grpc.lua` was specified but never written (per ADR-008, Lua uses `resty.http` instead of a gRPC client).
+- `aria-circuit-breaker.lua` shipped 2026-04-24 as a new shared lib — see §8.
+- `aria-quota.lua` and `aria-mask-strategies.lua` are split-out modules from `aria-core.lua` (organic refactor during Phase 5).
+- WASM masking engine (HLD §2.3 / ADR-005) not in v0.1 — Lua + Java sidecar covers the perf envelope.
+- Java sidecar shield package was specced as 3 separate classes (`PromptAnalyzer`, `TokenCounter`, `ContentFilter`); shipped as 2 (`ShieldServiceImpl` consolidates the gRPC-side stubs + `TokenEncoder` for the real tiktoken work). Permitted simplification — see §5.1.
 
 ---
 
@@ -280,23 +292,25 @@ end
 
 ### 2.5 Internal Functions — Business Rule Mapping
 
-| Function | Business Rule | Decision Matrix | Input | Output |
-|----------|--------------|-----------------|-------|--------|
-| `check_quota(conf, ctx, consumer)` | BR-SH-005 | DM-SH-006 | consumer_id, quota config | `{exhausted, remaining, period}` |
-| `apply_overage_policy(conf, ctx, consumer, quota)` | BR-SH-010 | DM-SH-001 | overage policy, quota state | HTTP response (402/429/200) |
-| `scan_prompt_injection(conf, ctx)` | BR-SH-011 | DM-SH-003 | message content, patterns | `{detected, confidence, category}` |
-| `grpc_analyze_prompt(ctx, initial)` | BR-SH-011 | DM-SH-004 | prompt content | `{is_injection, score}` or nil |
-| `scan_pii_in_prompt(conf, ctx)` | BR-SH-012 | DM-SH-003 | message content, PII patterns | `{detected, pii_type, matches}` |
-| `mask_pii_in_request(ctx, pii)` | BR-SH-012 | — | PII matches | Modified request body |
-| `apply_model_pin(ctx, pin)` | BR-SH-018 | — | model pin config | Modified model in request |
-| `select_provider(conf, ctx)` | BR-SH-001, 016, 017 | DM-SH-002 | routing strategy, providers | Selected provider |
-| `transform_request(ctx, provider)` | BR-SH-001 | — | canonical request, provider type | Transformed request |
-| `transform_response(ctx, body, provider)` | BR-SH-004 | — | provider response | OpenAI-format response |
-| `approximate_token_count(text)` | BR-SH-006 | — | text string | Approximate token int |
-| `calculate_cost(conf, model, usage)` | BR-SH-007 | — | model, token counts | Dollar amount (decimal) |
-| `update_quota(ctx, tokens)` | BR-SH-005 | — | token count | Redis INCRBY |
-| `check_alert_thresholds(conf, ctx)` | BR-SH-009 | — | thresholds, current usage | Alert sent or skipped |
-| `record_audit_event(ctx, type, details)` | BR-SH-015 | — | event type, masked details | Postgres write (async) |
+| Function | Business Rule | Decision Matrix | Input | Output | v0.1 Status |
+|----------|--------------|-----------------|-------|--------|-------------|
+| `check_quota(conf, ctx, consumer)` | BR-SH-005 | DM-SH-006 | consumer_id, quota config | `{exhausted, remaining, period}` | Shipped |
+| `apply_overage_policy(conf, ctx, consumer, quota)` | BR-SH-010 | DM-SH-001 | overage policy, quota state | HTTP response (402/429/200) | Shipped |
+| `scan_prompt_injection(conf, ctx)` | BR-SH-011 (Lua tier) | DM-SH-003 | message content, patterns | `{detected, confidence, category}` | Shipped (regex tier; community) |
+| `grpc_analyze_prompt(ctx, initial)` | BR-SH-011 (sidecar tier) | DM-SH-004 | prompt content | `{is_injection, score}` or nil | **NOT WIRED in v0.1.** Sidecar stub `ShieldServiceImpl.analyzePrompt` returns `is_injection=false`. Lua-side caller not added because the sidecar response is meaningless until vector-similarity is implemented. **v0.3 (enterprise CISO tier)** enables both sides simultaneously. |
+| `scan_pii_in_prompt(conf, ctx)` | BR-SH-012 | DM-SH-003 | message content, PII patterns | `{detected, pii_type, matches}` | Shipped |
+| `mask_pii_in_request(ctx, pii)` | BR-SH-012 | — | PII matches | Modified request body | Shipped |
+| `apply_model_pin(ctx, pin)` | BR-SH-018 | — | model pin config | Modified model in request | Shipped |
+| `select_provider(conf, ctx)` | BR-SH-001, 016, 017 | DM-SH-002 | routing strategy, providers | Selected provider | Shipped |
+| `transform_request(ctx, provider)` | BR-SH-001 | — | canonical request, provider type | Transformed request | Shipped (5 providers) |
+| `transform_response(ctx, body, provider)` | BR-SH-004 | — | provider response | OpenAI-format response | Shipped |
+| `approximate_token_count(text)` | BR-SH-006 | — | text string | Approximate token int | Shipped |
+| `calculate_cost(conf, model, usage)` | BR-SH-007 | — | model, token counts | Dollar amount (decimal) | Shipped |
+| `update_quota(ctx, tokens)` | BR-SH-005 | — | token count | Redis INCRBY | Shipped |
+| `check_alert_thresholds(conf, ctx)` | BR-SH-009 | — | thresholds, current usage | Alert sent or skipped | Shipped |
+| `record_audit_event(ctx, type, details)` | BR-SH-015 | — | event type, masked details | Pushes JSON onto Redis list `aria:audit_buffer` (1h TTL). | **Lua side shipped; sidecar consumer NOT IMPLEMENTED in v0.1 (FINDING-003).** Events accumulate in Redis and TTL out without being written to `audit_events` table. v0.2 fix: implement `AuditFlusher` Spring `@Scheduled` bean OR add `POST /v1/audit/event` HTTP bridge per ADR-008 pattern (preferred). See HLD §8.3. |
+
+**v0.1 implementation status legend.** Rows marked "Shipped" have working Lua implementations exercised by integration tests. Rows with explicit deferral notes are documented gaps that v0.2/v0.3 must close. The Lua-tier branch of BR-SH-011 (regex prompt-injection scan) ships in v0.1 and provides community-tier prompt security; the sidecar-tier branch (vector similarity + corpus matching) is enterprise CISO scope and intentionally deferred — see HLD §14 Tiering & License.
 
 ### 2.6 Circuit Breaker Implementation (BR-SH-002)
 
@@ -602,6 +616,117 @@ local function apply_mask_strategy(strategy_name, value, field_type)
 end
 ```
 
+### 3.4 NER Sidecar Bridge (BR-MK-006 — shipped 2026-04-24)
+
+**Goal.** Augment the regex-based PII detection in §3.2 with named-entity recognition for free-text content (PERSON, LOCATION, ORGANIZATION). Engine code is community tier; multilingual model **artefacts** (Turkish/Arabic/EN) are operator-supplied or enterprise-DPO bundled.
+
+**Transport.** HTTP `POST /v1/mask/detect` to sidecar `127.0.0.1:8081` (ADR-008). The Lua side sends candidate text strings; the sidecar returns recognized entity spans with confidence scores; the Lua side maps them back to JSONPath fields and applies the same strategy registry from §3.3.
+
+**Lua-side helpers (in `aria-mask.lua`):**
+
+```lua
+-- Helper: collect candidate strings from JSON body for NER analysis
+local function collect_ner_candidates(json_body, conf)
+    -- Walk the body, gather text-shaped values that pass regex prefiltering
+    -- (skip already-masked paths, skip non-string values, respect max_body_size)
+    local candidates = {}  -- list of {path, text, char_offset_in_combined}
+    local combined = {}    -- flat string sent to sidecar (one delimiter byte between parts)
+    -- ... walk JSON, append to candidates + combined ...
+    return candidates, table.concat(combined, "\x1F")  -- ASCII Unit Separator
+end
+
+-- Helper: send to sidecar, with circuit breaker
+local function try_sidecar_ner(text, route_id)
+    local breaker = aria_cb.get("ner-sidecar:" .. route_id)
+    if breaker:is_open() then
+        emit_metric("aria_mask_ner_circuit_open_total", 1, { route = route_id })
+        return nil  -- Skip; outer code falls back to regex-only
+    end
+
+    local httpc = require("resty.http").new()
+    httpc:set_timeout(conf.ner.sidecar.timeout_ms or 500)
+    local res, err = httpc:request_uri("http://127.0.0.1:8081/v1/mask/detect", {
+        method = "POST",
+        headers = { ["Content-Type"] = "application/json" },
+        body = cjson.encode({ text = text, language = conf.ner.language or "auto" }),
+    })
+
+    if not res or res.status >= 500 then
+        breaker:record_failure()
+        return nil
+    end
+    breaker:record_success()
+    return cjson.decode(res.body).entities  -- list of {type, start, end, score}
+end
+
+-- Helper: map sidecar entities back to JSONPath fields
+local function assign_entities_to_parts(candidates, entities)
+    -- For each entity span (start, end) in the combined string,
+    -- find the candidate whose offsets contain it, slice the local span,
+    -- emit {path, value, pii_type=entity.type, source="ner"}.
+    -- Skip entities below conf.ner.min_confidence.
+end
+```
+
+**body_filter integration sketch.** Inside `_M.body_filter`, after the regex `auto_detect` block (§3.2):
+
+```lua
+if conf.ner and conf.ner.enabled then
+    local candidates, combined = collect_ner_candidates(json_body, conf)
+    if #combined > 0 then
+        local entities = try_sidecar_ner(combined, ctx.var.route_id)
+        if entities then
+            local ner_matches = assign_entities_to_parts(candidates, entities)
+            for _, m in ipairs(ner_matches) do
+                if not is_already_masked(masked_fields, m.path) then
+                    local strategy = get_strategy_for_role(policy, m.pii_type, nil)
+                    if strategy ~= "full" then
+                        local masked_value = apply_mask_strategy(strategy, m.value, m.pii_type)
+                        jsonpath.set(json_body, m.path, masked_value)
+                        table.insert(masked_fields, {
+                            path = m.path, strategy = strategy,
+                            rule_id = "ner:" .. m.pii_type,
+                            pii_type = m.pii_type, source = "sidecar_ner"
+                        })
+                    end
+                end
+            end
+        elseif conf.ner.fail_mode == "closed" then
+            -- Sidecar unavailable AND fail-closed: redact all NER candidate fields
+            -- defensively. Cannot return 503 from body_filter (headers already sent).
+            for _, c in ipairs(candidates) do
+                jsonpath.set(json_body, c.path, "[REDACTED]")
+            end
+        end
+        -- fail_mode == "open" (default): silently skip; rely on regex-tier coverage
+    end
+end
+```
+
+**Schema additions** (extending §3.2 config schema):
+
+```json
+"ner": {
+    "enabled":     { "type": "boolean", "default": false },
+    "fail_mode":   { "type": "string",  "enum": ["open", "closed"], "default": "open" },
+    "language":    { "type": "string",  "default": "auto" },
+    "min_confidence": { "type": "number", "default": 0.7, "minimum": 0.0, "maximum": 1.0 },
+    "sidecar": {
+        "type": "object",
+        "properties": {
+            "endpoint":   { "type": "string", "default": "http://127.0.0.1:8081" },
+            "timeout_ms": { "type": "integer", "default": 500, "minimum": 50, "maximum": 5000 }
+        }
+    }
+}
+```
+
+**Defense in depth.** The Lua circuit breaker in §8 wraps every `try_sidecar_ner` call (per-endpoint state in `ngx.shared.dict`). The Java sidecar carries its **own inner breaker** (Resilience4j on `NerDetectionService.detect`) — both layers are intentional, not redundant. Levent locked this two-layer pattern 2026-04-24 (memory `project_session_2026-04-24.md`). The same pattern applies to all future Lua↔sidecar HTTP bridges.
+
+**Status:** Engine code (Java side: 8 classes in `aria-runtime/src/main/java/.../mask/ner/`) and Lua bridge code (above) are **shipped**. Model artefacts are **operator-supplied** (`runtime/docs/NER_MODELS.md` has the `optimum-cli export onnx` recipe for the default `savasy/bert-base-turkish-ner-cased`). Engine reports `ready=false` if no model file is mounted; the registry filters it out at startup.
+
+**Traceability:** BR-MK-006 → `aria-mask.lua` (`try_sidecar_ner`, `collect_ner_candidates`, `assign_entities_to_parts`, this section) + `MaskController.java` + `NerDetectionService.java` + 7 supporting NER classes.
+
 ---
 
 ## 4. Module C: aria-canary.lua — Detailed Design
@@ -782,160 +907,342 @@ local function check_stage_progression(conf, ctx, route_id)
 end
 ```
 
+### 4.4 Admin Control API — Manual Override (BR-CN-005)
+
+**Mechanism.** `aria-canary.lua` exposes a `_M.control_api()` function that registers admin endpoints with APISIX's plugin control-plane (`/v1/plugin/{plugin_name}/...`). These endpoints are reachable via the APISIX Admin API (port `9180`, protected by Admin API key). They give operators **manual override** of canary state without restarting APISIX or editing config.
+
+**Endpoints:**
+
+| Method + Path | Purpose | State transition |
+|---|---|---|
+| `GET  /v1/plugin/aria-canary/status/{route_id}` | Read current canary state from Redis | none — read-only |
+| `POST /v1/plugin/aria-canary/promote/{route_id}` | Force promote canary to 100% | `STAGE_N` / `PAUSED` → `PROMOTED`, `traffic_pct=100` |
+| `POST /v1/plugin/aria-canary/rollback/{route_id}` | Force rollback to baseline | any state → `ROLLED_BACK`, `traffic_pct=0` |
+| `POST /v1/plugin/aria-canary/pause/{route_id}` | Halt stage progression | `STAGE_N` → `PAUSED` (manual breach declaration) |
+| `POST /v1/plugin/aria-canary/resume/{route_id}` | Resume stage progression | `PAUSED` → `STAGE_N` (must verify breach window has passed) |
+
+**Request/response schema (representative — `status`):**
+
+```json
+// GET /v1/plugin/aria-canary/status/api-orders → 200
+{
+  "route_id":    "api-orders",
+  "state":       "STAGE_2",
+  "traffic_pct": 25,
+  "stage_started_at": "2026-04-24T10:15:00Z",
+  "current_stage_index": 1,
+  "schedule": [{"pct":5,"hold":"5m"},{"pct":25,"hold":"10m"},{"pct":100,"hold":"0"}],
+  "error_rate": { "canary": 0.012, "baseline": 0.008 },
+  "p95_latency_ms": { "canary": 142, "baseline": 138 },
+  "last_progression_check": "2026-04-24T10:25:13Z"
+}
+```
+
+**Lua skeleton (`aria-canary.lua`):**
+
+```lua
+function _M.control_api()
+    return {
+        {
+            methods = {"GET"},
+            uris    = {"/v1/plugin/aria-canary/status/*"},
+            handler = function(api_ctx)
+                local route_id = ngx.var.uri:match("/status/(.+)$")
+                local state = redis:hgetall("aria:canary:" .. route_id)
+                if not state or state.state == nil then
+                    return 404, cjson.encode({ error = "no canary configured for route " .. route_id })
+                end
+                return 200, cjson.encode(enrich_with_metrics(state, route_id))
+            end
+        },
+        {
+            methods = {"POST"},
+            uris    = {"/v1/plugin/aria-canary/promote/*"},
+            handler = function(api_ctx)
+                local route_id = ngx.var.uri:match("/promote/(.+)$")
+                redis:hmset("aria:canary:" .. route_id, {
+                    state = "PROMOTED",
+                    traffic_pct = "100",
+                    promoted_at = tostring(ngx.now())
+                })
+                aria_core.counter_inc("aria_canary_promote_total", 1, { route = route_id })
+                send_notification(nil, route_id, "promoted", { manual = true })
+                return 200, cjson.encode({ status = "promoted", route_id = route_id })
+            end
+        },
+        -- … rollback / pause / resume follow the same pattern …
+    }
+end
+```
+
+**Authorization.** APISIX's plugin control-plane is exposed on the Admin API port (default `9180`) and requires the Admin API key. No app-level auth in the plugin; the gateway perimeter is the trust boundary. Network-policy guidance: restrict port `9180` to the operator subnet (or to a bastion) — this is documented in `runtime/docs/DEPLOYMENT.md`.
+
+**Idempotency.** Promote/rollback/pause/resume are idempotent — calling promote twice is a no-op once `state == "PROMOTED"`. The handlers re-write the state regardless to refresh `promoted_at` timestamps; consumers should treat duplicate calls as a non-event.
+
+**v0.1 substitute for ariactl.** ariactl (HLD §3.5) is deferred to v0.2; in v0.1, operator scripts call these endpoints directly with `curl`. v0.2's ariactl will be a thin wrapper. This is the rationale documented in HLD §3.5.
+
+**Traceability:** BR-CN-005 → `aria-canary.lua _M.control_api()` (lines 1012–1097 in current source) + this section.
+
 ---
 
 ## 5. Aria Runtime (Java 21 Sidecar) — Detailed Design
 
-### 5.1 Java Class Hierarchy
+### 5.1 Java Class Hierarchy (shipped reality, 2026-04-25)
 
 ```
-AriaException (abstract)
-├── ValidationException (400)
-├── BusinessException (422)
-├── ResourceNotFoundException (404)
-├── SystemException (500)
-└── ExternalServiceException (502/503/504)
+AriaException (RuntimeException, mapped to ARIA_* error codes)
 
-AriaRuntimeApplication
+AriaRuntimeApplication                          # @SpringBootApplication
 ├── core/
-│   ├── GrpcServer           -- UDS listener, handler registration
-│   │   ├── start()          -- Bind to UDS, register services
-│   │   ├── stop()           -- Graceful drain
+│   ├── GrpcServer                              # gRPC listener; FORWARD-COMPAT only — no Lua callers in v0.1 (ADR-008)
+│   │   ├── start()
+│   │   ├── stop()                              # graceful drain
 │   │   └── registerService(BindableService)
-│   ├── HealthController     -- HTTP /healthz, /readyz
-│   │   ├── liveness()       -- Always 200 if JVM alive
-│   │   └── readiness()      -- 200 if Redis+Postgres reachable
-│   ├── ShutdownManager      -- SIGTERM handler
-│   │   └── onShutdown()     -- Set readiness=503, drain, close connections
-│   └── RequestContext       -- ScopedValue definitions
-│       ├── CONSUMER_ID      -- ScopedValue<String>
-│       ├── ROUTE_ID         -- ScopedValue<String>
-│       ├── REQUEST_ID       -- ScopedValue<String>
-│       └── run(Runnable, values) -- Execute with scoped context
+│   ├── GrpcExceptionInterceptor                # Maps Java exceptions to gRPC Status codes
+│   ├── HealthController                        # @RestController — /healthz, /readyz, /actuator/*
+│   │   ├── liveness()                          # 200 if JVM alive
+│   │   └── readiness()                         # 200 iff Redis + Postgres reachable
+│   ├── ShutdownManager                         # SIGTERM hook
+│   │   └── onShutdown()                        # readiness=503 → drain HTTP + gRPC → close clients
+│   └── RequestContext                          # ScopedValue<…> CONSUMER_ID / ROUTE_ID / REQUEST_ID; runScoped(Runnable, values)
+│
 ├── shield/
-│   ├── PromptAnalyzer       -- gRPC ShieldService.AnalyzePrompt
-│   │   ├── analyzePrompt(PromptAnalysisRequest)
-│   │   ├── vectorSimilarity(String content, List<String> patterns)
-│   │   └── calculateConfidence(double similarity) → float
-│   ├── TokenCounter         -- gRPC ShieldService.CountTokens
-│   │   ├── countTokens(TokenCountRequest)
-│   │   ├── getTokenizer(String model) → Tokenizer
-│   │   └── reconcile(String consumerId, int exact, int approximate)
-│   └── ContentFilter        -- gRPC ShieldService.FilterResponse
-│       ├── filterResponse(ContentFilterRequest)
-│       └── classifyContent(String content) → ContentCategory
+│   ├── ShieldServiceImpl                       # gRPC ShieldService — consolidates the v1.0-spec'd PromptAnalyzer/TokenCounter/ContentFilter
+│   │   ├── analyzePrompt(PromptAnalysisRequest) -- v0.1 STUB returns is_injection=false (v0.3 enables real detection — enterprise CISO)
+│   │   ├── countTokens(TokenCountRequest)       -- delegates to TokenEncoder (REAL)
+│   │   └── filterResponse(ContentFilterRequest) -- v0.1 STUB returns is_harmful=false (v0.3 enables real filter — enterprise CISO)
+│   └── TokenEncoder                            # REAL — jtokkit cl100k_base + per-model registry; Karar A fallback (§5.3.1)
+│       ├── count(String model, String content) → TokenCountResult{ tokenCount, encodingUsed, accuracy }
+│       └── selectEncoding(String model) → Encoding
+│
 ├── mask/
-│   └── NerDetector          -- gRPC MaskService.DetectPII
-│       ├── detectPII(PiiDetectionRequest)
-│       └── extractEntities(String text) → List<PiiEntity>
+│   ├── MaskController                          # @RestController POST /v1/mask/detect (Lua-callable canonical, ADR-008)
+│   ├── MaskServiceImpl                         # gRPC MaskService.DetectPII — delegates to NerDetectionService (forward-compat; no Lua callers)
+│   └── ner/                                    # NER pipeline — BR-MK-006 (shipped 2026-04-24)
+│       ├── NerEngine (interface)
+│       │   └── detect(String text, String language) → List<PiiEntity>
+│       ├── NerEngineRegistry                   # @Component — Spring injects List<NerEngine>; filters by aria.mask.ner.engines config + isReady() probe
+│       ├── NerDetectionService                 # @Service — orchestrator shared by HTTP + gRPC; applies min_confidence, dedup, merge
+│       ├── NerProperties                       # @ConfigurationProperties("aria.mask.ner") — engines list, min_confidence, circuit-breaker thresholds
+│       ├── PiiEntity                           # DTO: type, start, end, score, source(engine_id)
+│       ├── CompositeNerEngine                  # Unions+dedupes outputs across registered engines
+│       ├── OpenNlpNerEngine                    # English (Apache OpenNLP); models in /opt/aria/models/opennlp/
+│       └── DjlHuggingFaceNerEngine             # Multilingual ONNX (Turkish-BERT default); models in /opt/aria/models/turkish-bert/
+│
 ├── canary/
-│   └── DiffEngine           -- gRPC CanaryService.DiffResponses
-│       ├── diffResponses(DiffRequest)
-│       ├── compareStatus(int a, int b) → boolean
-│       ├── compareBodyStructure(byte[] a, byte[] b) → float
-│       └── summarizeDiff(DiffResult) → String
-└── common/
-    ├── RedisClient           -- Async Redis operations (Lettuce)
-    │   ├── get(String key) → CompletableFuture<String>
-    │   ├── incrBy(String key, long amount) → CompletableFuture<Long>
-    │   └── close()
-    ├── PostgresClient        -- Async Postgres operations (R2DBC or async JDBC)
-    │   ├── insertAuditEvent(AuditEvent) → CompletableFuture<Void>
-    │   ├── insertBillingRecord(BillingRecord) → CompletableFuture<Void>
-    │   └── close()
-    └── AriaException         -- Exception hierarchy
+│   ├── DiffController                          # @RestController POST /v1/diff (Lua-callable canonical, ADR-008)
+│   ├── CanaryServiceImpl                       # gRPC CanaryService.DiffResponses — delegates to DiffEngine (forward-compat; no Lua callers)
+│   └── DiffEngine                              # @Service — REAL structural diff; shared by HTTP + gRPC
+│       ├── compare(DiffInput a, DiffInput b) → DiffResult
+│       ├── compareStatus(int, int) → boolean
+│       ├── compareHeaders(Map, Map) → HeaderDelta
+│       ├── compareBodyStructure(byte[], byte[]) → BodySimilarity{score, diffPaths}
+│       └── summarize(DiffResult) → String
+│
+├── common/
+│   ├── AriaRedisClient                         # Lettuce async (renamed from "RedisClient" in v1.0 spec)
+│   │   ├── get(String key) → CompletableFuture<String>
+│   │   ├── incrBy(String key, long amount) → CompletableFuture<Long>
+│   │   ├── lpush / rpush / blpop                # for audit buffer (consumer not yet wired — FINDING-003)
+│   │   └── close()
+│   ├── PostgresClient                          # R2DBC async
+│   │   ├── insertAuditEvent(...) → CompletableFuture<Void>   ← v0.1: 0 callers; FINDING-003 / HLD §8.3
+│   │   ├── insertBillingRecord(...) → CompletableFuture<Void>
+│   │   └── close()
+│   └── AriaException
+│
+└── config/
+    └── AriaConfig                              # @ConfigurationProperties("aria") — uds-path, shutdown-grace-seconds, mask.ner.*
 ```
 
-### 5.2 gRPC Server Implementation (BR-RT-001)
+**Departures from v1.0 spec (permitted simplifications, all reflected in shipped tests):**
+- `PromptAnalyzer` + `TokenCounter` + `ContentFilter` consolidated into `ShieldServiceImpl` + `TokenEncoder`. Two of the three concerns are stubs in v0.1; collapsing reduces ceremony without reducing testability.
+- `RedisClient` → `AriaRedisClient`. Project-internal rename for clarity (avoids collision with Lettuce's own `RedisClient`).
+- `NerDetector` (1 class in v1.0) expanded into the 8-class `mask/ner/` package — needed for the pluggable multi-engine architecture (BR-MK-006).
+- `DiffEngine` (1 class in v1.0) split into `DiffEngine` (logic) + `DiffController` (HTTP) + `CanaryServiceImpl` (gRPC). Cross-transport engine sharing — see §5.2.1.
+- `AriaException` is a single class with error-code hierarchy in fields (not subclasses for each error category). Mapping to HTTP status codes happens in `GrpcExceptionInterceptor` and a Spring `@RestControllerAdvice`.
+
+### 5.2 gRPC Server (BR-RT-001) — forward-compat only in v0.1
+
+The gRPC server is retained per ADR-008 as a v1.x evolution path for non-Lua callers, but **no Lua plugin uses it in v0.1.** The canonical Lua-callable transport is HTTP/JSON over loopback TCP — see §5.2.1 below.
+
+The server now binds to loopback TCP (port `8082`) instead of UDS (per ADR-008 supersession of ADR-003). Virtual-thread executor and graceful drain remain unchanged from v1.0:
 
 ```java
 public class GrpcServer {
     private final Server server;
-    private final String udsPath;
-    
-    public GrpcServer(String udsPath, List<BindableService> services) {
-        this.udsPath = udsPath;
+    public GrpcServer(int port, List<BindableService> services) {
         var builder = NettyServerBuilder
-            .forAddress(new DomainSocketAddress(udsPath))
+            .forAddress(new InetSocketAddress("127.0.0.1", port))   // loopback only
             .executor(Executors.newVirtualThreadPerTaskExecutor())  // BR-RT-002
             .addService(new HealthServiceImpl());
-        
-        for (var service : services) {
-            builder.addService(service);
-        }
-        
+        for (var s : services) builder.addService(s);
         this.server = builder.build();
     }
-    
-    public void start() throws IOException {
-        // Ensure parent directory exists
-        Files.createDirectories(Path.of(udsPath).getParent());
-        server.start();
-        
-        // Set socket permissions (0660)
-        Files.setPosixFilePermissions(Path.of(udsPath),
-            PosixFilePermissions.fromString("rw-rw----"));
-    }
+    public void start() throws IOException { server.start(); }
 }
 ```
 
-### 5.3 Token Counter Implementation (BR-SH-006)
+NetworkPolicy in the Helm chart restricts ingress to `127.0.0.1:8082` from the same-pod APISIX container only.
+
+### 5.2.1 HTTP/JSON Bridges (canonical Lua transport, ADR-008)
+
+**Pattern.** Each domain `@Service` is injected into both an `@RestController` (HTTP, Lua-callable) and a `@GrpcService` impl (forward-compat). Logic lives in the `@Service` once; transport is a thin wrapper. This is the **cross-transport engine-sharing pattern** that ADR-008 establishes as canonical.
+
+**Two instances shipped in v0.1:**
+
+```
+DiffEngine (@Service)
+  ├── used by → DiffController (@RestController, POST /v1/diff)
+  └── used by → CanaryServiceImpl (gRPC CanaryService.DiffResponses)
+
+NerDetectionService (@Service)
+  ├── used by → MaskController (@RestController, POST /v1/mask/detect)
+  └── used by → MaskServiceImpl (gRPC MaskService.DetectPII)
+```
+
+**Sketch — `DiffController`:**
 
 ```java
-public class TokenCounter extends ShieldServiceGrpc.ShieldServiceImplBase {
-    
-    private final Map<String, Tokenizer> tokenizers = new ConcurrentHashMap<>();
-    private final RedisClient redis;
-    private final PostgresClient postgres;
-    
-    @Override
-    public void countTokens(TokenCountRequest request,
-                           StreamObserver<TokenCountResponse> observer) {
-        // BR-RT-002: Runs on virtual thread via executor
-        ScopedValue.runWhere(RequestContext.REQUEST_ID, request.getRequestId(), () -> {
-            try {
-                var tokenizer = getTokenizer(request.getModel());
-                int exact = tokenizer.encode(request.getContent()).size();
-                int delta = exact - request.getLuaApproximateCount();
-                
-                // Reconcile in Redis (BR-SH-006)
-                if (delta != 0) {
-                    var quotaKey = buildQuotaKey(request.getConsumerId());
-                    redis.incrBy(quotaKey, delta);  // Correct the Lua estimate
-                }
-                
-                // Write billing record to Postgres
-                postgres.insertBillingRecord(BillingRecord.builder()
-                    .consumerId(request.getConsumerId())
-                    .model(request.getModel())
-                    .tokensInput(request.getInputTokens())
-                    .tokensOutput(request.getOutputTokens())
-                    .isReconciled(true)
-                    .build());
-                
-                observer.onNext(TokenCountResponse.newBuilder()
-                    .setExactTokenCount(exact)
-                    .setDelta(delta)
-                    .build());
-                observer.onCompleted();
-                
-            } catch (Exception e) {
-                observer.onError(Status.INTERNAL
-                    .withDescription("Token counting failed: " + e.getMessage())
-                    .asRuntimeException());
-            }
-        });
-    }
-    
-    private Tokenizer getTokenizer(String model) {
-        // Cache tokenizers per model family
-        return tokenizers.computeIfAbsent(
-            getModelFamily(model),
-            family -> TiktokenRegistry.getEncoding(family)
-        );
+@RestController
+public class DiffController {
+    private final DiffEngine engine;
+
+    @PostMapping("/v1/diff")
+    public ResponseEntity<DiffHttpResponse> diff(@RequestBody DiffHttpRequest req) {
+        // Decode base64 bodies (HTTP/JSON envelope), build DiffInput, delegate
+        DiffResult r = engine.compare(req.toInputA(), req.toInputB());
+        return ResponseEntity.ok(DiffHttpResponse.of(r));
     }
 }
 ```
+
+**Sketch — `MaskController`:**
+
+```java
+@RestController
+public class MaskController {
+    private final NerDetectionService ner;
+
+    @PostMapping("/v1/mask/detect")
+    public DetectResponse detect(@RequestBody DetectRequest req) {
+        // Validation, then delegate; min_confidence + dedup applied inside the service
+        return DetectResponse.of(ner.detect(req.text(), req.language()));
+    }
+}
+```
+
+**Why this pattern, not just gRPC.** ADR-008 documents the rationale (no Lua gRPC client; debuggability with curl; performance trade-off accepted). For LLD purposes, the contract is: *new sidecar functionality exposed to Lua MUST go through the HTTP bridge pattern; new domain services SHOULD be Spring `@Service` beans so both transports can share the implementation when forward-compat needs add the gRPC side later.*
+
+**Bridge endpoint conventions** (followed by both `DiffController` and `MaskController`, recommended for future bridges):
+- Path prefix: `/v1/{module}/{action}`. Example: `/v1/audit/event` (planned for FINDING-003 fix).
+- Request: JSON body with explicit base64 fields for binary payloads (do not rely on multipart).
+- Response: JSON, with `X-Aria-Trace-Id` header for correlation.
+- Errors: HTTP status + JSON `{ "error": { "type": "aria_error", "code": "ARIA_*", "message": "..." } }` per HLD §4.3.
+- Latency budget: < 5ms P95 for sub-prompt operations (mask, audit), < 20ms P95 for body-level diff.
+
+### 5.3 Token Counter — `TokenEncoder` (BR-SH-006)
+
+Real implementation shipped 2026-04-22 via `aria-runtime@19c8118`. Uses **jtokkit** (Apache 2.0 Java port of OpenAI's tiktoken). The class lives in `shield/TokenEncoder.java` and is invoked by `ShieldServiceImpl.countTokens` (the gRPC service-impl is forward-compat; the actual call path in v0.1 is a future HTTP bridge `POST /v1/shield/count` — not yet wired because async reconciliation runs on the Lua side via `aria-quota.lua` / `aria-core.lua`):
+
+```java
+@Component
+public class TokenEncoder {
+    private final EncodingRegistry registry = Encodings.newDefaultEncodingRegistry();
+    private final Map<String, Encoding> cache = new ConcurrentHashMap<>();
+
+    public TokenCountResult count(String model, String content) {
+        var enc = selectEncoding(model);  // see §5.3.1
+        int n = enc.countTokens(content);
+        return new TokenCountResult(n, enc.getName(), accuracyFor(model));
+    }
+
+    private Encoding selectEncoding(String model) {
+        return cache.computeIfAbsent(model, m -> {
+            var byModel = registry.getEncodingForModel(m);
+            if (byModel.isPresent()) return byModel.get();
+            // Karar A: cl100k_base fallback for unknown models — see §5.3.1
+            return registry.getEncoding(EncodingType.CL100K_BASE);
+        });
+    }
+
+    private Accuracy accuracyFor(String model) {
+        return registry.getEncodingForModel(model).isPresent()
+            ? Accuracy.EXACT
+            : Accuracy.FALLBACK;
+    }
+}
+
+public record TokenCountResult(int tokenCount, String encodingUsed, Accuracy accuracy) {}
+public enum Accuracy { EXACT, FALLBACK }
+```
+
+**Reconciliation (per BR-SH-006).** The Lua side computes a fast approximate token count in `body_filter` and updates Redis quota immediately (write-then-correct pattern). When the sidecar has the response body it computes `exact - approximate = delta` and applies an `INCRBY delta` to the quota key. v0.1 ships the Lua-side approximation + write; the **sidecar reconciliation HTTP path is on the v0.2 backlog** (depends on the same HTTP bridge pattern as audit/diff/ner).
+
+### 5.3.1 Tokenizer Fallback Chain (Karar A locked 2026-04-22, Karar B open)
+
+**Karar A — model unknown to the registry → use `cl100k_base`, return `Accuracy.FALLBACK`.**
+
+Rationale (locked 2026-04-22 per memory `project_license_split_refinement.md`):
+- Gatekeeper is a horizontal product; customer model mix is unpredictable (OpenAI, Claude, Gemini, self-hosted Llama, custom fine-tunes).
+- Every model must get a working count — strict mode (throw on unknown) would break customer integrations.
+- `cl100k_base` is within 5–20% of most modern tokenizers; honest `FALLBACK` flag lets billing pipelines apply provider-specific correction if needed.
+
+**Resolution chain:**
+
+```
+selectEncoding(model):
+    1. Exact match in jtokkit's model→encoding table (e.g., "gpt-4o" → o200k_base)
+       → return Accuracy.EXACT
+    2. Future extension point — provider-specific branches BEFORE the fallback:
+       - "claude-*" → (when added) Anthropic tokenizer, Accuracy.EXACT
+       - "gemini-*" → (when added) SentencePiece, Accuracy.EXACT
+    3. Default fallback → cl100k_base, Accuracy.FALLBACK
+```
+
+The extension point in step 2 is intentional: when a customer requires exact accuracy for a specific non-OpenAI provider, add a dedicated branch above the fallback. Fallback remains the catch-all.
+
+**Karar B — role-token semantics — STILL OPEN.**
+
+Current code: `ShieldServiceImpl.countTokens` returns `tokenCount` for the supplied content but does NOT separately attribute tokens to message roles (system / user / assistant). Inline comment in source: *"input_tokens / output_tokens left at 0 — Karar B (role semantics) is still open."*
+
+Per OpenAI's tiktoken-with-roles spec, each message carries ~3 tokens of role/structural overhead. Three options for v0.2:
+1. **(recommended)** Apply OpenAI's standard 3-tokens-per-message overhead. Universal across providers, defacto standard.
+2. Content-only counting (current behavior) — under-counts billing slightly.
+3. Configurable per provider — most flexible but adds knobs.
+
+**Pending decision** to be recorded as **ADR-009** before v0.2 starts. Until then, `input_tokens` / `output_tokens` are reported as 0 in the proto response and the Lua side carries the responsibility for splitting input vs output via the upstream `usage` object (which all major providers return in the response body).
+
+### 5.4 Graceful Shutdown (BR-RT-004)
+
+**Per-transport drain.** `ShutdownManager.onShutdown()` orchestrates a four-phase drain over the `aria.shutdown-grace-seconds` window (default 30s):
+
+```java
+public class ShutdownManager {
+    public void onShutdown() {
+        // 1. Set readiness=503 — load balancer / k8s service stops sending new traffic
+        health.setReady(false);
+
+        // 2. Stop accepting new HTTP connections (Spring Boot / Tomcat)
+        applicationContext.close();   // triggers @PreDestroy on @RestControllers
+
+        // 3. Stop accepting new gRPC connections, drain in-flight (forward-compat path)
+        grpcServer.shutdown();
+        if (!grpcServer.awaitTermination(graceSeconds, TimeUnit.SECONDS)) {
+            grpcServer.shutdownNow();
+        }
+
+        // 4. Close datastore clients
+        redis.close();
+        postgres.close();
+    }
+}
+```
+
+Differences vs v1.0 spec:
+- **No UDS socket file to delete** — sidecar binds to loopback TCP per ADR-008.
+- HTTP server (Spring Boot) drained alongside gRPC; both transports respect the same grace window.
+- Readiness is flipped to `503` BEFORE drain so the kube `Service` removes the pod from rotation; `preStop sleep 5` in the pod spec gives the readiness probe one cycle to flip before SIGTERM (see HLD §3.4 deployment guidance).
 
 ### 5.4 Graceful Shutdown (BR-RT-004)
 
@@ -1014,20 +1321,27 @@ function _M.error_response(ctx, status, code, message)
     return ngx.exit(status)
 end
 
--- gRPC/UDS client (lazy connection)
-function _M.grpc_call(service, method, request)
-    -- Returns response or nil (sidecar unavailable)
+-- HTTP/JSON sidecar client (canonical Lua transport per ADR-008)
+-- Replaces the v1.0-spec'd grpc_call(); aria-grpc.lua was never written.
+function _M.http_call(endpoint, method, body, opts)
+    -- Returns parsed-json response or nil (sidecar unavailable / circuit open)
+    -- Honors aria-circuit-breaker.lua state for the given endpoint key
     -- Implements deadline (500ms default)
 end
 
--- Async audit event (fire-and-forget to sidecar → Postgres)
+-- Async audit event (Lua → Redis list `aria:audit_buffer`)
 function _M.record_audit_event(ctx, event_type, details)
-    -- Mask PII in details before sending
-    -- If sidecar unavailable, attempt direct Redis buffer
+    -- Mask PII in details before pushing
+    -- v0.1 GAP: sidecar consumer not implemented — events accumulate
+    -- in Redis with 1h TTL and are silently dropped without DB write.
+    -- v0.2 fix: AuditFlusher Spring @Scheduled bean OR POST /v1/audit/event
+    -- bridge per ADR-008. See HLD §8.3 + FINDING-003.
 end
 
 return _M
 ```
+
+**Dependencies:** `aria-core.lua` is required by all three plugins. Plugins also pull in `aria-circuit-breaker.lua` (§8) when invoking sidecar HTTP bridges (`try_sidecar_ner` in mask, `try_sidecar_diff` in canary).
 
 ---
 
@@ -1095,7 +1409,104 @@ local patterns = {
 
 ---
 
-## 8. Configuration Validation
+## 8. Shared Library: aria-circuit-breaker.lua (NEW — shipped 2026-04-24)
+
+A generic, per-endpoint circuit breaker shared library. Wraps every Lua → sidecar HTTP call so a misbehaving sidecar endpoint does not cascade into request failures. Used by the mask NER bridge today (§3.4); precedent for all future Lua↔sidecar HTTP bridges.
+
+### 8.1 State machine
+
+```
+                         failure_threshold breached
+                ┌────────────────────────────────────────┐
+                │                                         ▼
+        ┌──────────────┐                       ┌──────────────┐
+        │   CLOSED     │                       │     OPEN     │
+        │ (allow all)  │                       │ (skip calls; │
+        └──────────────┘                       │  cooldown)   │
+                ▲                              └──────────────┘
+                │                                         │
+                │   probe_succeeds                        │ cooldown elapsed
+                │                                         ▼
+                │                              ┌──────────────┐
+                └──────────────────────────────│  HALF_OPEN   │
+                          probe_fails          │ (one probe)  │
+                          → re-open            └──────────────┘
+```
+
+### 8.2 Storage
+
+State per endpoint key in `ngx.shared.dict("aria_cb")` (allocated in `nginx.conf` snippet — see deployment docs). Keys:
+
+| Key | Value | TTL |
+|---|---|---|
+| `cb:{endpoint_key}:state` | `"CLOSED" \| "OPEN" \| "HALF_OPEN"` | none |
+| `cb:{endpoint_key}:failures` | int (sliding window) | `window_seconds` |
+| `cb:{endpoint_key}:opened_at` | float (`ngx.now()`) | reset on transition |
+
+`endpoint_key` is operator-supplied at construction (e.g., `"ner-sidecar:" .. route_id` or `"shadow-diff"`). Per-route isolation prevents one bad route from tripping breakers for unrelated routes.
+
+### 8.3 Public API
+
+```lua
+local cb = require("apisix.plugins.lib.aria-circuit-breaker")
+
+local breaker = cb.get(endpoint_key, {
+    failure_threshold     = 5,    -- consecutive failures to open
+    cooldown_seconds      = 30,   -- time in OPEN before HALF_OPEN probe
+    window_seconds        = 60,   -- failure-counter sliding window
+})
+
+-- Hot-path usage:
+if breaker:is_open() then
+    -- skip sidecar, fall back to regex-only mode (or fail-closed per config)
+    return nil
+end
+
+local res, err = make_http_call()  -- via aria_core.http_call
+
+if err or not res or res.status >= 500 then
+    breaker:record_failure()
+    return nil
+else
+    breaker:record_success()
+    return res.body
+end
+```
+
+### 8.4 Defense-in-depth pairing with Java side
+
+The Java sidecar carries its **own inner breaker** (Resilience4j on `NerDetectionService.detect`, `DiffEngine.compare`, etc.) with separate thresholds. Two-layer breaker is intentional, not redundant:
+- The **Lua outer breaker** protects APISIX from sidecar slowness (latency budget).
+- The **Java inner breaker** protects sidecar resources from a misbehaving model or downstream dep.
+
+This pairing was locked by Levent on 2026-04-24 (memory `project_session_2026-04-24.md`) and is expected for every new Lua↔sidecar HTTP bridge. Configuration-wise, the two layers should NOT have identical thresholds — the inner should be tighter (faster open) so the outer rarely needs to.
+
+### 8.5 Metrics
+
+| Metric | Type | Labels |
+|---|---|---|
+| `aria_cb_state` | gauge | `endpoint_key`, `state` (0=closed, 1=half_open, 2=open) |
+| `aria_cb_open_total` | counter | `endpoint_key` (tripped count) |
+| `aria_cb_skipped_total` | counter | `endpoint_key` (calls short-circuited while open) |
+| `aria_cb_probe_success_total` | counter | `endpoint_key` |
+| `aria_cb_probe_failure_total` | counter | `endpoint_key` |
+
+Exposed via `aria_core.emit_metric` to the standard APISIX Prometheus endpoint.
+
+### 8.6 Relationship to Shield's existing circuit breaker (§2.6)
+
+§2.6 documents a Redis-backed circuit breaker for **provider failover** (per-provider state shared across APISIX workers). `aria-circuit-breaker.lua` is a **per-worker, per-endpoint** breaker for **sidecar HTTP bridges** (worker-local `ngx.shared.dict`, no Redis dependency). They serve different concerns:
+
+| Concern | Storage | Scope | Module |
+|---|---|---|---|
+| LLM provider failover (BR-SH-002) | Redis | cluster-wide | `aria-shield.lua` §2.6 |
+| Sidecar bridge failure (BR-MK-006, BR-CN-007, …) | `ngx.shared.dict` | worker-local | `aria-circuit-breaker.lua` (this section) |
+
+Unifying them in v0.2 has been considered (open question) — for now, both exist intentionally because cluster-wide state for sidecar calls (which are loopback to the same pod) adds latency without benefit.
+
+---
+
+## 9. Configuration Validation
 
 ### 8.1 Shield Configuration JSON Schema
 
@@ -1158,7 +1569,7 @@ local patterns = {
 
 ---
 
-## 9. Performance Design Decisions
+## 10. Performance Design Decisions
 
 | Concern | Decision | Rationale |
 |---------|----------|-----------|
@@ -1167,70 +1578,91 @@ local patterns = {
 | Prometheus cardinality | Check `aria_metrics_count` before emitting. Drop if > 10K | Prevent Prometheus OOM |
 | Canary error tracking | 10-second Redis counters with 2m TTL | Bounded memory, automatic cleanup |
 | SSE streaming | No buffering — forward each `ngx.arg[1]` chunk immediately | O(1) memory per stream |
-| Sidecar gRPC deadline | 500ms default, configurable | Fail fast if sidecar is slow |
-| Virtual thread per request | No pooling — JVM manages scheduling | Virtual threads are ~1KB each |
+| **Lua → sidecar HTTP/JSON over loopback (ADR-008)** | `resty.http` to `127.0.0.1:8081`; deadline 500ms default; cross-transport engine sharing pattern (§5.2.1) | ~1–2ms vs UDS gRPC ~0.1ms; trade-off accepted to avoid `lua-resty-grpc` dependency. Inner Java breaker + outer Lua breaker (§8.4) for fault isolation. |
+| Sidecar HTTP deadline | 500ms default, configurable per bridge (mask NER 500ms, shadow diff 2000ms) | Fail fast if sidecar is slow; longer for body-level diff |
+| Virtual thread per request (sidecar) | No pooling — JVM manages scheduling | Virtual threads are ~1KB each |
+| Tokenizer cache (TokenEncoder) | Per-model `ConcurrentHashMap<String, Encoding>` | Tokenizer construction is expensive; one cache key per model; bounded by # of distinct models seen |
 
 ---
 
-## 10. Testing Strategy
+## 11. Testing Strategy
 
-### 10.1 Unit Tests
+### 11.1 Unit Tests
 
-| Module | Framework | Coverage Target | Key Tests |
-|--------|-----------|----------------|-----------|
-| Lua plugins | busted (Lua test framework) | > 80% | Mask strategies, PII regex, provider transforms, quota logic |
-| Java sidecar | JUnit 5 + Mockito | > 80% | Token counting, NER detection, diff engine, gRPC handlers |
-| ariactl | Go testing | > 70% | Command parsing, API client, output formatting |
+| Module | Framework | Coverage Target | Key Tests | v0.1 Test File Count |
+|---|---|---|---|---|
+| Lua plugins | busted | > 80% | Mask strategies, PII regex, provider transforms, quota logic, NER bridge helpers, circuit breaker state machine, canary diff helpers, control_api handlers | 7+ test files |
+| Java sidecar | JUnit 5 + Mockito | > 80% | TokenEncoder fallback chain (Karar A), DiffEngine structural compare, NerEngineRegistry, NerDetectionService, MaskController, DiffController, CompositeNerEngine dedup | 16+ test files (~121 tests as of 2026-04-24) |
+| ariactl | Go testing | > 70% | Command parsing, API client, output formatting | **DEFERRED to v0.2** |
 
-### 10.2 Integration Tests
+### 11.2 Integration Tests
 
 | Test Suite | Environment | Key Scenarios |
-|-----------|-------------|---------------|
-| Shield e2e | APISIX + Redis + mock LLM | Request routing, quota enforcement, failover, streaming |
-| Mask e2e | APISIX + Redis + upstream mock | JSONPath masking, role policies, PII detection, tokenization |
-| Canary e2e | APISIX + Redis + two upstreams | Stage progression, auto-rollback, manual override |
-| Sidecar e2e | Java + Redis + Postgres | gRPC handlers, token counting, audit persistence |
+|---|---|---|
+| Shield e2e | APISIX + Redis + mock LLM | Request routing, quota enforcement, failover, SSE streaming, OpenAI-compat across 5 providers |
+| Mask e2e | APISIX + Redis + upstream mock | JSONPath masking, role policies, PII regex detection, NER bridge fail-open/fail-closed, circuit breaker open/half-open/closed transitions |
+| Canary e2e | APISIX + Redis + two upstreams | Stage progression, auto-rollback, manual override via `_M.control_api()` (status/promote/rollback/pause/resume), shadow diff sidecar bridge |
+| Sidecar e2e | Sidecar JVM + Redis + Postgres | TokenEncoder accuracy + Karar A fallback, DiffEngine structural compare, MaskController + NER pipeline, /healthz + /readyz, graceful HTTP+gRPC drain |
+| Smoke (full stack) | docker-compose | End-to-end: client → APISIX → Lua plugins → sidecar HTTP bridges → Redis/Postgres |
 
-### 10.3 Performance Tests
+### 11.3 Performance Tests
 
 | Test | Tool | Target | Scenario |
-|------|------|--------|----------|
+|---|---|---|---|
 | Shield latency overhead | wrk2 / k6 | < 5ms P95 | 1000 req/s through Shield vs. direct |
-| Mask throughput | k6 | < 1ms P95 for 50KB body | 1000 req/s with 10 masking rules |
+| Mask throughput (regex only) | k6 | < 1ms P95 for 50KB body | 1000 req/s with 10 masking rules |
+| Mask + NER bridge throughput | k6 | < 5ms P95 added | 1000 req/s, `fail_mode=open`, engine ready |
 | Canary routing accuracy | Custom script | < 1% variance | 10K requests, verify traffic split |
+| Shadow diff latency | k6 | < 20ms P95 | Async path; primary unaffected |
 | SSE streaming | Custom client | < 1ms per chunk | 100 concurrent streams |
+| Circuit breaker behavior | Chaos test | Opens within `failure_threshold` failures; half-open after `cooldown_seconds` | Sidecar offline simulation |
 
 ---
 
-## 11. Traceability Matrix
+## 12. Traceability Matrix
 
-| Business Rule | LLD Section | Function / Class | Test |
-|--------------|-------------|-----------------|------|
-| BR-SH-001 | 2.2, 2.7 | `_M.access()`, `transform_request()`, `transformers.*` | Shield e2e: routing |
-| BR-SH-002 | 2.6 | `check_circuit_breaker()`, `record_provider_result()` | Shield e2e: failover |
-| BR-SH-003 | 2.3 | `_M.body_filter()` (streaming branch) | SSE streaming test |
-| BR-SH-004 | 2.7 | `transformers.*.transform_response()` | Unit: response mapping |
-| BR-SH-005 | 2.2 | `check_quota()` | Shield e2e: quota |
-| BR-SH-006 | 5.3 | `TokenCounter.countTokens()` | Sidecar e2e: reconciliation |
-| BR-SH-007 | 2.3 | `calculate_cost()` | Unit: cost calculation |
-| BR-SH-010 | 2.2 | `apply_overage_policy()` | Shield e2e: overage |
-| BR-SH-011 | 2.2 | `scan_prompt_injection()`, `grpc_analyze_prompt()` | Shield e2e: injection |
-| BR-SH-012 | 2.2 | `scan_pii_in_prompt()`, `mask_pii_in_request()` | Shield e2e: PII |
-| BR-SH-015 | 2.4 | `record_audit_event()` | Sidecar e2e: audit |
-| BR-MK-001 | 3.2 | `_M.body_filter()` | Mask e2e: JSONPath |
-| BR-MK-002 | 3.2 | `resolve_role_policy()` | Mask e2e: roles |
-| BR-MK-003 | 3.2, 7 | `detect_pii_patterns()`, `aria-pii.lua` | Unit: PII regex |
-| BR-MK-004 | 3.3 | `apply_mask_strategy()`, `mask_strategies.*` | Unit: strategies |
-| BR-MK-005 | 3.2 | `_M.log()` | Mask e2e: audit |
-| BR-CN-001 | 4.2, 4.3 | `_M.access()`, `check_stage_progression()` | Canary e2e: progression |
-| BR-CN-002 | 4.3 | `calculate_error_rate()` | Canary e2e: error rate |
-| BR-CN-003 | 4.3 | `check_stage_progression()` (rollback branch) | Canary e2e: rollback |
-| BR-CN-004 | 4.3 | `calculate_p95()` | Canary e2e: latency guard |
-| BR-RT-001 | 5.2 | `GrpcServer` | Sidecar e2e: gRPC |
-| BR-RT-002 | 5.2 | `newVirtualThreadPerTaskExecutor()` | Sidecar e2e: concurrency |
-| BR-RT-004 | 5.4 | `ShutdownManager.onShutdown()` | Sidecar e2e: shutdown |
+| Business Rule | LLD Section | Function / Class | Test | v0.1 Status |
+|---|---|---|---|---|
+| BR-SH-001 | 2.2, 2.7 | `_M.access()`, `transform_request()`, `transformers.*` | Shield e2e: routing | Shipped (5 providers) |
+| BR-SH-002 | 2.6 | `check_circuit_breaker()`, `record_provider_result()` | Shield e2e: failover | Shipped (Redis-backed, separate from §8 lib) |
+| BR-SH-003 | 2.3 | `_M.body_filter()` (streaming branch) | SSE streaming test | Shipped |
+| BR-SH-004 | 2.7 | `transformers.*.transform_response()` | Unit: response mapping | Shipped |
+| BR-SH-005 | 2.2 | `check_quota()` | Shield e2e: quota | Shipped |
+| BR-SH-006 | 5.3 | `TokenEncoder.count()` (was `TokenCounter.countTokens` in v1.0 spec) | Sidecar unit: tokenizer accuracy + Karar A fallback | Shipped — Lua side does write-then-correct; sidecar HTTP reconciliation path on v0.2 backlog |
+| BR-SH-007 | 2.3 | `calculate_cost()` | Unit: cost calculation | Shipped |
+| BR-SH-008 | 2.4 | `_M.log()` metric emissions | Shield e2e: metrics | Shipped |
+| BR-SH-009 | 2.4 | `check_alert_thresholds()` | Unit: alert thresholds | Shipped |
+| BR-SH-010 | 2.2 | `apply_overage_policy()` | Shield e2e: overage | Shipped |
+| BR-SH-011 (Lua/regex tier) | 2.2 | `scan_prompt_injection()` | Shield e2e: injection (regex) | Shipped — community |
+| BR-SH-011 (sidecar/vector tier) | 2.2, 5.1 | `grpc_analyze_prompt()` (Lua, NOT WIRED) + `ShieldServiceImpl.analyzePrompt` (Java STUB) | — | **DEFERRED v0.3** — enterprise CISO tier |
+| BR-SH-012 | 2.2 | `scan_pii_in_prompt()`, `mask_pii_in_request()` | Shield e2e: PII | Shipped |
+| BR-SH-013 (data exfiltration guard) | — | — | — | **DEFERRED v0.3** — enterprise CISO |
+| BR-SH-014 (system prompt extraction guard) | — | — | — | **DEFERRED v0.3** — enterprise CISO |
+| BR-SH-015 | 2.4 | `record_audit_event()` (Lua, pushes to Redis) + `PostgresClient.insertAuditEvent()` (Java, **0 callers**) | Sidecar e2e: audit | **PARTIAL — Lua side wired; sidecar consumer NOT IMPLEMENTED in v0.1 (FINDING-003).** v0.2 fix per HLD §8.3. |
+| BR-SH-018 | 2.2 | `apply_model_pin()` | Shield e2e: model pin | Shipped |
+| BR-MK-001 | 3.2 | `_M.body_filter()` JSONPath rules | Mask e2e: JSONPath | Shipped |
+| BR-MK-002 | 3.2 | `resolve_role_policy()` | Mask e2e: roles | Shipped |
+| BR-MK-003 | 3.2, 7 | `detect_pii_patterns()`, `aria-pii.lua` | Unit: PII regex | Shipped (8 patterns including PAN scope-hygiene per HLD §10.2) |
+| BR-MK-004 | 3.3 | `apply_mask_strategy()`, `mask_strategies.*` | Unit: 12 strategies | Shipped — *`tokenize` strategy currently emits non-reversible hash; Redis-backed reversible tokens reserved for v0.2 (HLD §9.1)* |
+| BR-MK-005 | 3.2 | `_M.log()` masking audit | Mask e2e: audit | **PARTIAL — same gap as BR-SH-015** (Lua emits, sidecar does not consume) |
+| BR-MK-006 | 3.4 | `try_sidecar_ner`, `collect_ner_candidates`, `assign_entities_to_parts` (Lua) + `MaskController` + `NerDetectionService` + 7 supporting NER classes (Java) | Mask e2e: NER fail-open/fail-closed | Shipped 2026-04-24 — engine code community; multilingual model artefacts operator-supplied or enterprise DPO bundled |
+| BR-MK-007 (advanced policy semantics) | — | — | — | **DEFERRED v0.3** |
+| BR-MK-008 (DLP-style outbound mask) | — | — | — | **DEFERRED v0.3** — enterprise DPO |
+| BR-CN-001 | 4.2, 4.3 | `_M.access()`, `check_stage_progression()` | Canary e2e: progression | Shipped |
+| BR-CN-002 | 4.3 | `calculate_error_rate()` | Canary e2e: error rate | Shipped |
+| BR-CN-003 | 4.3 | `check_stage_progression()` (rollback branch) | Canary e2e: rollback | Shipped |
+| BR-CN-004 | 4.3 | `calculate_p95()` | Canary e2e: latency guard | Shipped |
+| BR-CN-005 | 4.4 | `_M.control_api()` (status/promote/rollback/pause/resume) | Canary e2e: manual override | Shipped (was missing from v1.0 traceability matrix) |
+| BR-CN-006 | 4.2 | `should_shadow`, `capture_shadow_payload`, `fire_shadow` | Canary e2e: shadow traffic | Shipped (Iter 1, 2026-04-22) |
+| BR-CN-007 | 4.3 | `try_sidecar_diff` (Lua) + `DiffController` + `DiffEngine` (Java) | Canary e2e: shadow diff | Shipped (Iter 2c+3, 2026-04-23) |
+| BR-RT-001 | 5.2 | `GrpcServer` | Sidecar e2e: gRPC startup | Shipped — but no Lua callers in v0.1 (forward-compat per ADR-008) |
+| BR-RT-002 | 5.2 | `newVirtualThreadPerTaskExecutor()` | Sidecar e2e: concurrency | Shipped |
+| BR-RT-004 | 5.4 | `ShutdownManager.onShutdown()` | Sidecar e2e: shutdown | Shipped (HTTP + gRPC drain) |
+
+**v1.0 → v1.1 changes to traceability:** Added BR-SH-008, BR-SH-009, BR-SH-018, BR-CN-005, BR-CN-006, BR-CN-007, BR-MK-006. Added "v0.1 Status" column. Marked BR-SH-011 sidecar tier, BR-SH-013/014, BR-MK-007/008 as v0.3 deferred (enterprise scope per HLD §14). Acknowledged audit pipeline gap (BR-SH-015, BR-MK-005). Renamed `TokenCounter.countTokens` to `TokenEncoder.count` per shipped class names.
 
 ---
 
-*Document Version: 1.0 | Created: 2026-04-08*
-*Status: Draft — Pending Human Approval*
+*Document Version: 1.1 | Created: 2026-04-08 | Revised: 2026-04-25*
+*Status: v1.1 Draft — Pending Human Approval (after PHASE_REVIEW_2026-04-25 adversarial drift report)*
+*Change log v1.0 → v1.1: §1 plugin tree (real layout, ariactl deferred, no aria-grpc.lua, +aria-circuit-breaker.lua, real Java class roster), §2.5 internal-functions table (audit gap + sidecar stub status notes), §3.4 NEW (NER bridge BR-MK-006), §4.4 NEW (control_api admin endpoints BR-CN-005), §5.1 class hierarchy (shipped reality — ShieldServiceImpl + TokenEncoder, 8 NER classes, DiffController/MaskController), §5.2 (gRPC forward-compat only) + §5.2.1 NEW (HTTP bridges per ADR-008), §5.3 (TokenEncoder real impl with jtokkit), §5.3.1 NEW (Karar A cl100k_base fallback chain + Karar B open), §5.4 (HTTP+gRPC drain, no UDS file deletion), §6 (HTTP not gRPC, audit gap acknowledgement), §8 NEW (aria-circuit-breaker shared lib design), renumbered §9-§12, §10 added HTTP bridge perf row, §11 (test counts updated, ariactl deferred), §12 traceability rewrite (BR-MK-006 + BR-CN-005-007 + BR-SH-018/008/009 added; v0.1 Status column).*

@@ -8,17 +8,22 @@ Three supported deployment shapes:
    external secrets and managed datastores. Suitable for pilots and small
    internal deployments.
 3. **Kubernetes** — APISIX and `aria-runtime` co-located **in the same
-   pod** via the sidecar pattern, communicating over a shared Unix Domain
-   Socket. Ships with a Helm chart for the sidecar half; APISIX colocation
-   needs a small extension (see *Kubernetes — sidecar pattern* below).
+   pod** via the sidecar pattern, communicating over **HTTP/JSON on the
+   pod-local loopback interface** (`127.0.0.1:8081`) per ADR-008. Ships
+   with a Helm chart for the sidecar half; APISIX colocation needs a small
+   extension (see *Kubernetes — sidecar pattern* below).
 
-> **A note on the sidecar pattern.** The `aria-runtime` container talks to
-> APISIX over a UDS file in a shared volume. Unix Domain Sockets only work
-> *within a single Linux kernel namespace* — i.e. **same pod**. You cannot
-> put APISIX and the sidecar in separate Deployments and connect them
-> over a Service IP; that's TCP, not UDS. The helm chart in this repo
-> deploys the sidecar half; pairing it with APISIX is the operator's
-> integration step.
+> **A note on the sidecar pattern.** The `aria-runtime` container binds
+> its HTTP listener to `127.0.0.1:8081` only (loopback bind). Both
+> containers run in the same pod's network namespace, so APISIX can reach
+> the sidecar via `http://127.0.0.1:8081/...` from `resty.http`. You
+> **cannot** put APISIX and the sidecar in separate Deployments and reach
+> the sidecar over a Service IP — the loopback bind would refuse the
+> connection by design. The Helm chart deploys the sidecar half plus a
+> `NetworkPolicy` that restricts ingress to the same-pod APISIX
+> container; pairing the APISIX container into the same pod is the
+> operator's integration step. *(v1.0 of this guide described UDS gRPC.
+> ADR-008 supersedes that decision — see HLD §13.)*
 
 ## Prerequisites
 
@@ -126,23 +131,32 @@ services:
 
 ### Why same-pod
 
-The Lua plugin in APISIX must reach the sidecar over a **Unix Domain
-Socket** for two reasons:
+The Lua plugin in APISIX reaches the sidecar over **HTTP/JSON on
+loopback TCP** (`127.0.0.1:8081`) per ADR-008. Same-pod placement is
+still required, for two reasons:
 
-1. **Latency.** UDS round-trip is ~5–10 μs; TCP loopback is ~50–100 μs.
-   On the request hot path with multiple plugin hops, this matters.
-2. **Security.** The socket is a file. File permissions (`0660` + shared
-   group) gate who can connect — there's no port to firewall, no TLS
-   to terminate, no service mesh to traverse.
+1. **Latency.** Loopback TCP is ~1–2ms round-trip; cross-pod TCP via
+   Service is ~5–15ms (network plugin + iptables + service mesh if
+   present). On the request hot path with multiple plugin hops, the
+   intra-pod path keeps the budget reasonable. *(v1.0 of this guide
+   advertised UDS at ~5–10 μs; the shipped implementation does not use
+   UDS — see ADR-008 for the rationale.)*
+2. **Security.** The sidecar listener is bound to `127.0.0.1` only —
+   not externally routable. Within the pod, a `NetworkPolicy` restricts
+   ingress to the same-pod APISIX container. There's no port exposed to
+   the cluster network, no TLS to terminate for trusted-pod traffic,
+   no service mesh to traverse.
 
-UDS only works within a single Linux network namespace — i.e. inside
-**one Pod**. Two Pods talking over a Service IP is TCP, not UDS, and
-the Lua plugin won't connect.
+The combination "loopback bind + same-pod placement + NetworkPolicy"
+gives the same trust boundary the v1.0 UDS-file-permission model gave,
+without requiring a Lua gRPC client (which `lua-resty-grpc` couldn't
+reliably provide). See HLD §5.1 trust model for the full reasoning.
 
 ### Pod skeleton
 
-The minimum viable pod runs both containers and shares an `emptyDir`
-volume mounted at `/var/run/aria` in both:
+The minimum viable pod runs both containers in the same pod network
+namespace; APISIX reaches the sidecar via `127.0.0.1:8081` (no shared
+volume needed — the listener is in-process loopback, not a UDS file):
 
 ```yaml
 apiVersion: apps/v1
@@ -166,7 +180,7 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
-        fsGroup: 1000           # both containers share GID for UDS access
+        fsGroup: 1000
       containers:
         - name: apisix
           image: apache/apisix:3.8.0-debian
@@ -174,8 +188,6 @@ spec:
             - containerPort: 9080      # http
             - containerPort: 9443      # https
           volumeMounts:
-            - name: aria-uds
-              mountPath: /var/run/aria
             - name: aria-plugins
               mountPath: /opt/aria-plugins/apisix/plugins
               readOnly: true
@@ -186,8 +198,11 @@ spec:
         - name: aria-runtime
           image: ghcr.io/3eai-labs/gatekeeper/aria-runtime:0.1.0
           ports:
-            - containerPort: 8081      # health + metrics
+            - containerPort: 8081      # HTTP — Lua-callable bridges + health + metrics
+            - containerPort: 8082      # gRPC — forward-compat, no Lua callers in v0.1 (ADR-008)
           env:
+            - name: SERVER_ADDRESS
+              value: "127.0.0.1"          # loopback bind — pod is the trust boundary
             - name: ARIA_REDIS_HOST
               value: redis-cluster.svc.cluster.local
             - name: ARIA_REDIS_PASSWORD
@@ -198,9 +213,6 @@ spec:
             - name: ARIA_POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef: { name: aria-secrets, key: postgres-password }
-          volumeMounts:
-            - name: aria-uds
-              mountPath: /var/run/aria
           livenessProbe:
             httpGet: { path: /healthz, port: 8081 }
             initialDelaySeconds: 15
@@ -219,8 +231,6 @@ spec:
             limits:   { cpu: 500m, memory: 384Mi }
 
       volumes:
-        - name: aria-uds
-          emptyDir: {}
         - name: aria-plugins
           configMap:
             name: aria-plugins        # rendered by the helm chart
@@ -230,10 +240,33 @@ spec:
       terminationGracePeriodSeconds: 30
 ```
 
+A companion `NetworkPolicy` restricts ingress on the sidecar's HTTP and
+gRPC ports to the same-pod APISIX container only:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: aria-sidecar-loopback-only }
+spec:
+  podSelector: { matchLabels: { app: apisix-with-aria } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app: apisix-with-aria }}}]   # same-pod / same-deployment only
+      ports:
+        - { port: 8081, protocol: TCP }    # HTTP bridges (Lua-callable)
+        - { port: 8082, protocol: TCP }    # gRPC (forward-compat)
+    - from: [{ namespaceSelector: { matchLabels: { name: monitoring }}}]
+      ports: [{ port: 8081 }]              # Prometheus scrape
+```
+
 Key points:
 
-- `fsGroup: 1000` — both containers see `/var/run/aria` as group-owned
-  by GID 1000, so the socket file (created `0660`) is readable by both.
+- **Loopback bind** (`SERVER_ADDRESS=127.0.0.1`) — the sidecar listeners
+  are not externally routable. Combined with the `NetworkPolicy` above,
+  this gives the same "no network exposure" property the v1.0 UDS model
+  was claimed to provide.
+- **No shared volume needed** for sidecar communication — the v1.0
+  `aria-uds` `emptyDir` mount is gone (ADR-008).
 - `livenessProbe` on `/healthz` (no dependency check) — restarts only on
   hard JVM hang.
 - `readinessProbe` on `/readyz` (Redis + PostgreSQL must respond) —
@@ -277,12 +310,15 @@ Kustomize or a chart-of-charts.
 
 **Pattern B — fork the sidecar template.** Copy
 `sidecar-deployment.yaml` into your own chart, add the APISIX container
-spec, point both at the same UDS volume, render with both halves
-together.
+spec, ensure both run in the same pod network namespace, render with
+both halves together.
 
 We don't recommend (or test) running the chart with `runtime.enabled:
-false` and trying to bridge the sidecar from a separate Pod over TCP —
-the Lua plugin doesn't speak TCP to the sidecar today.
+false` and trying to bridge the sidecar from a separate Pod over a
+Service — the sidecar binds to `127.0.0.1` only, so a Service-routed
+connection wouldn't terminate. Cross-pod sidecar deployment would
+require either a non-loopback bind (operator must override
+`SERVER_ADDRESS`) or a sidecar proxy — both are out of scope for v0.1.
 
 ## Building from source
 
@@ -414,12 +450,16 @@ kubectl exec -it <pod> -c aria-runtime -- \
 kubectl exec -it <pod> -c aria-runtime -- \
   wget -qO- http://localhost:8081/readyz | jq
 
-# 4. UDS file exists and is socket-shaped
-kubectl exec -it <pod> -c aria-runtime -- \
-  ls -la /var/run/aria/aria.sock
+# 4. Sidecar HTTP bridge endpoints reachable from APISIX container
+kubectl exec -it <pod> -c apisix -- \
+  curl -sS http://127.0.0.1:8081/healthz
+kubectl exec -it <pod> -c apisix -- \
+  curl -sS -X POST http://127.0.0.1:8081/v1/mask/detect \
+    -H 'Content-Type: application/json' \
+    -d '{"text":"test","language":"auto"}'
 
 # 5. APISIX-side connection (look for connection errors)
-kubectl logs <pod> -c apisix | grep -i 'aria\|uds\|sidecar'
+kubectl logs <pod> -c apisix | grep -i 'aria\|sidecar\|connection refused'
 ```
 
 If any step fails, see the *Troubleshooting* section of

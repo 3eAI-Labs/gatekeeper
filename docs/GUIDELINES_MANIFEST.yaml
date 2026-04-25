@@ -1,0 +1,84 @@
+# Sentinel manifest — 3e-Aria-Gatekeeper
+# Created: 2026-04-25 (Phase 6 review FINDING-000 resolution)
+# Purpose: Tells Sentinel phase-review which workspace guidelines apply,
+#          which compliance frameworks the spec MAY claim, and which
+#          phase gates require human approval signatures.
+
+project:
+  name: 3e-Aria-Gatekeeper
+  positioning: horizontal LLM governance suite for Apache APISIX
+  license_model: open-core (Apache 2.0 Lua plugins + community/persona-gated enterprise Java sidecar)
+  primary_repo: github.com/3eAI-Labs/gatekeeper
+  sidecar_repo: aria-runtime (private; same org)
+
+guidelines_root: /home/lsg/Workspaces/guidelines/
+
+guidelines:
+  core:
+    - CODING_GUIDELINES_COMMON.md
+    - CODING_GUIDELINES_JAVA.md         # aria-runtime sidecar
+    - CODING_GUIDELINES_GO.md           # ariactl (v0.2 deferred)
+    # CODING_GUIDELINES_PY.md not enabled — Python not in tech stack
+    - ERROR_HANDLING_GUIDELINE.md
+    - OBSERVABILITY_GUIDELINE.md
+    - API_DESIGN_GUIDELINE.md
+    - DATABASE_GUIDELINE.md
+    - CONFIG_MANAGEMENT_GUIDELINE.md
+    - DATA_GOVERNANCE_GUIDELINE.md
+    - SECURITY_TESTING_GUIDELINE.md
+  domain:
+    - ARCHITECT_GUIDELINE.md
+    - HLD_GUIDELINE.md
+    - LLD_GUIDELINE.md
+    - DEVOPS_GUIDELINE.md
+    - DEVELOPER_GUIDELINE.md
+    - BUSINESS_ANALYST_GUIDELINE.md
+    - COLLABORATION_GUIDELINE.md
+  conditional:
+    # EVENT_DRIVEN_ARCHITECTURE_GUIDELINE.md — NOT enabled (no Kafka in v1.0 per ADR-006)
+    []
+  glossary: GLOSSARY.md
+
+# Frameworks the spec/release artefacts MAY claim. Anything outside this list
+# triggers a phase-review padding warning (e.g., 2026-04-08 PCI-DSS halucination).
+compliance_frameworks:
+  enabled:
+    - GDPR        # EU data protection (HLD §10.1)
+    - KVKK        # Turkish data protection (HLD §10.1)
+    - PDPL        # Saudi Arabia / Iraq personal-data protection (VISION §5.4)
+  # PCI-DSS NOT enabled — Gatekeeper does not process payment data.
+  # PAN regex is a PII pattern; PCI-DSS scope is operator's audit responsibility.
+  # See feedback memory: feedback_compliance_framing.md
+  scope_hygiene_only:
+    - PCI-DSS    # capability statement only — see HLD §10.2 reframe
+    # Add HIPAA / SOC2 here if/when capability statements arrive
+
+# Phase gates that require explicit human approval before progression.
+phase_gates:
+  require_human_signature:
+    - phase: 1
+      artifact: VISION.md / SRS.md / USER_STORIES.md / DATA_CLASSIFICATION.md
+    - phase: 2
+      artifact: BUSINESS_LOGIC.md / DECISION_MATRIX.md / EXCEPTION_CODES.md
+    - phase: 3
+      artifact: HLD.md / API_CONTRACTS.md / INTEGRATION_MAP.md / ADRs
+    - phase: 4
+      artifact: LLD.md / DB_SCHEMA.md / SEQUENCE_DIAGRAMS.md / ERROR_CODES.md
+    - phase: 6
+      artifact: CODE_REVIEW_REPORT.md / RELEASE_NOTES.md
+      lesson_learned: "AI Reviewer 'pending human final review' was silently treated as approval 2026-04-08 → 2026-04-25; never again"
+
+  drift_detection:
+    rerun_phase_review_after:
+      - "5 commits since last freeze"
+      - "OR 7 days since last freeze"
+      - "OR any change to public-facing claim (VISION, RELEASE_NOTES, USER_GUIDE compliance text)"
+
+# Cross-cutting policies enforced during phase-review.
+policies:
+  capability_vs_compliance: feedback_compliance_framing.md  # framework names trigger scope hygiene framing
+  spec_code_drift: "Any new shared lib, business rule, or sidecar endpoint MUST land with HLD §3.x + LLD §11 traceability update in the same commit, or open a tracked drift item for next freeze."
+  approved_does_not_mean_complete: "Phase N approval covers the artefacts produced in that phase, not all downstream phases. Re-confirm at every freeze."
+
+# Versioning for this manifest itself.
+manifest_version: 1.0

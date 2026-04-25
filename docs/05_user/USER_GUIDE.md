@@ -712,20 +712,25 @@ The Aria Runtime is an optional Java 21 sidecar that provides advanced processin
 
 ### 7.2 Deployment
 
-The sidecar runs in the same pod as APISIX. Two transports are available:
+The sidecar runs in the same pod as APISIX. The canonical transport for
+Lua plugins is **HTTP/JSON over loopback TCP** (per ADR-008):
 
 ```
-APISIX Container <── UDS (~0.1ms) ───> Aria Runtime Container  (canonical path)
-                  /var/run/aria/aria.sock
+APISIX Container ──── HTTP localhost ────> Aria Runtime Container
+                      127.0.0.1:8081       (POST /v1/diff, /v1/mask/detect,
+                                            GET /healthz, /readyz, /actuator/*)
 
-APISIX Container <── HTTP localhost ──> Aria Runtime Container  (shadow diff bridge)
-                  127.0.0.1:8081
+APISIX Container ──── (gRPC, forward-compat only — no Lua callers in v0.1)
+                      127.0.0.1:8082
 ```
 
-The gRPC-over-UDS path is the canonical transport for non-Lua clients. The
-shadow diff bridge uses HTTP because the Lua plugin uses `resty.http` — this
-avoids pulling in a Lua gRPC client dependency. Both paths invoke the same
-`DiffEngine`, so output is identical.
+The Lua plugins use `resty.http` to call the sidecar over loopback. This
+avoids pulling in a Lua gRPC client dependency and keeps endpoints
+debuggable with `curl`/`jq`. Both transports (where present) invoke the
+same Spring `@Service` (`DiffEngine`, `NerDetectionService`), so output
+is identical — see HLD §3.4 and ADR-008. The sidecar binds to
+`127.0.0.1` only; a NetworkPolicy in the Helm chart further restricts
+ingress to the same-pod APISIX container.
 
 ### 7.3 Health Checks
 
@@ -737,10 +742,10 @@ avoids pulling in a Lua gRPC client dependency. Both paths invoke the same
 ### 7.4 Graceful Shutdown
 
 On `SIGTERM`:
-1. `/readyz` returns 503 (stop receiving new requests)
-2. Drain in-flight gRPC calls (up to 30s configurable)
-3. Close Redis and PostgreSQL connections
-4. Remove UDS socket file
+1. `/readyz` returns 503 (load-balancer / kube Service stops sending new requests)
+2. Stop accepting new HTTP connections (Spring Boot @PreDestroy)
+3. Drain in-flight HTTP requests + gRPC calls (up to `aria.shutdown-grace-seconds`, default 30s)
+4. Close Redis and PostgreSQL connections
 5. Exit
 
 ---
@@ -762,13 +767,14 @@ On `SIGTERM`:
 | `ARIA_POSTGRES_PASSWORD` | (empty) | PostgreSQL password |
 | `SERVER_PORT` | `8081` | Health check HTTP port |
 
-### 8.2 UDS Configuration
+### 8.2 Sidecar Loopback Bind Configuration
 
 | Setting | Default | Notes |
-|---------|---------|-------|
-| Socket path | `/var/run/aria/aria.sock` | Shared volume between APISIX and sidecar |
-| Socket permissions | `0660` | Owner + group read/write |
-| Shutdown grace period | `30s` | Maximum drain time on SIGTERM |
+|---|---|---|
+| HTTP listener address | `127.0.0.1:8081` | Loopback bind only — NOT externally routable. Override via `SERVER_ADDRESS` only if you intentionally want cross-pod reachability (out of scope for v0.1, see HLD §5.1). |
+| gRPC listener address | `127.0.0.1:8082` | Forward-compat only; no Lua callers in v0.1 (ADR-008). |
+| NetworkPolicy | Helm chart restricts ingress on `:8081`/`:8082` to same-pod APISIX container | Required as defense-in-depth even with loopback bind |
+| Shutdown grace period | `30s` (`aria.shutdown-grace-seconds`) | Maximum drain time on SIGTERM |
 
 ### 8.3 Resource Sizing
 
@@ -930,13 +936,14 @@ Pre-built Grafana dashboards are included in the `dashboards/` directory:
 
 ### 10.5 Sidecar Not Connecting
 
-**Cause:** UDS socket not shared between containers.
+**Cause:** APISIX container can't reach the sidecar's loopback bind. Common reasons: containers not in the same pod (so `127.0.0.1` resolves to a different network namespace), sidecar not started yet, or NetworkPolicy too restrictive.
 
 **Check:**
-1. Verify the shared volume is mounted at `/var/run/aria` in both containers
-2. Check socket file exists: `ls -la /var/run/aria/aria.sock`
-3. Check sidecar readiness: `curl http://localhost:8081/readyz`
-4. Lua plugins degrade gracefully without the sidecar — check APISIX error logs for "sidecar unavailable" warnings
+1. Both containers in the **same pod**: `kubectl get pod <pod> -o jsonpath='{.spec.containers[*].name}'` should list both `apisix` and `aria-runtime`.
+2. Sidecar listener up: `kubectl exec -it <pod> -c apisix -- curl -sS http://127.0.0.1:8081/healthz` should return `{"status":"alive"}`.
+3. Sidecar readiness: `kubectl exec -it <pod> -c apisix -- curl -sS http://127.0.0.1:8081/readyz | jq` — `ready=true` when Redis + PostgreSQL respond.
+4. NetworkPolicy permits same-pod ingress: `kubectl describe networkpolicy aria-sidecar-loopback-only` — should allow ingress from same `app=apisix-with-aria` selector.
+5. Lua plugins degrade gracefully without the sidecar — check APISIX error logs for "sidecar unavailable" warnings: `kubectl logs <pod> -c apisix | grep -i 'sidecar\|connection refused'`.
 
 ### 10.6 Redis Connection Failures
 

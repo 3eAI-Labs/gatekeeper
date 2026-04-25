@@ -2,8 +2,9 @@
 
 **Project:** 3e-Aria-Gatekeeper
 **Phase:** 3 — Architecture
-**Version:** 1.0
-**Date:** 2026-04-08
+**Version:** 1.1
+**Date:** 2026-04-25 (revised); 2026-04-08 (v1.0 baseline)
+**v1.1 Driver:** PHASE_REVIEW_2026-04-25 — corrected canary admin endpoints to actual APISIX plugin control-plane paths (§2.2-2.4); added §2.5 sidecar HTTP bridges (canonical Lua transport per ADR-008); added §2.6 sidecar health endpoints; flagged gRPC services (§3) as forward-compat-only in v0.1; added NER schema (§4.2).
 
 ---
 
@@ -112,13 +113,18 @@ data: [DONE]
 
 ## 2. Canary — Admin API Extensions
 
-Base URL: `http://apisix-admin:9180` (APISIX Admin API)
+**Mechanism:** Endpoints are registered with APISIX's plugin control-plane via `aria-canary.lua _M.control_api()`. They are reachable on the APISIX Admin API port (default `9180`).
+
+**Base URL:** `http://apisix-admin:9180`
+**Auth:** APISIX Admin API key (`X-API-KEY` header) — see `docs/05_user/USER_GUIDE.md` for setup.
+
+> **v1.1 path correction.** v1.0 of this document specified paths of the form `POST /aria/canary/{route_id}/{action}`. The shipped implementation uses APISIX's plugin control-plane convention: `POST /v1/plugin/aria-canary/{action}/{route_id}`. The substantive contract (state transitions, response shapes, idempotency) is unchanged.
 
 ### 2.1 Get Canary Status
 
 ```
-GET /aria/canary/{route_id}/status
-Authorization: APISIX Admin API key
+GET /v1/plugin/aria-canary/status/{route_id}
+X-API-KEY: <admin-key>
 ```
 
 **Response (200):**
@@ -162,8 +168,8 @@ Authorization: APISIX Admin API key
 ### 2.2 Promote Canary
 
 ```
-POST /aria/canary/{route_id}/promote
-Authorization: APISIX Admin API key
+POST /v1/plugin/aria-canary/promote/{route_id}
+X-API-KEY: <admin-key>
 ```
 
 **Response (200):**
@@ -172,16 +178,15 @@ Authorization: APISIX Admin API key
   "route_id": "route-api-v2",
   "state": "PROMOTED",
   "traffic_pct": 100,
-  "promoted_at": "2026-04-08T14:35:00Z",
-  "promoted_by": "operator:admin-1"
+  "promoted_at": "2026-04-08T14:35:00Z"
 }
 ```
 
 ### 2.3 Rollback Canary
 
 ```
-POST /aria/canary/{route_id}/rollback
-Authorization: APISIX Admin API key
+POST /v1/plugin/aria-canary/rollback/{route_id}
+X-API-KEY: <admin-key>
 ```
 
 **Response (200):**
@@ -190,22 +195,127 @@ Authorization: APISIX Admin API key
   "route_id": "route-api-v2",
   "state": "ROLLED_BACK",
   "traffic_pct": 0,
-  "rolled_back_at": "2026-04-08T14:35:00Z",
-  "rolled_back_by": "operator:admin-1"
+  "rolled_back_at": "2026-04-08T14:35:00Z"
 }
 ```
 
 ### 2.4 Pause / Resume
 
 ```
-POST /aria/canary/{route_id}/pause
-POST /aria/canary/{route_id}/resume
-Authorization: APISIX Admin API key
+POST /v1/plugin/aria-canary/pause/{route_id}
+POST /v1/plugin/aria-canary/resume/{route_id}
+X-API-KEY: <admin-key>
 ```
+
+State transitions:
+- `pause`: any progressing state → `PAUSED` (manual breach declaration; halts stage progression).
+- `resume`: `PAUSED` → previous stage state (resumes progression at the next monitor tick).
+
+All four mutation endpoints are idempotent — repeated calls re-write state but do not double-act.
 
 ---
 
-## 3. Sidecar — gRPC Service Definitions
+## 2.5 Sidecar HTTP Bridges (Lua-callable, per ADR-008)
+
+**Base URL:** `http://127.0.0.1:8081` (loopback bind; sidecar in same pod as APISIX). Not externally routable; protected by NetworkPolicy + loopback bind. No app-layer auth — pod is the trust boundary (HLD §5.1).
+
+These endpoints are the **canonical Lua↔sidecar transport** for v0.1 (per ADR-008). gRPC equivalents in §3 exist but have no Lua callers in v0.1.
+
+### 2.5.1 Diff (Canary Shadow Compare)
+
+```
+POST /v1/diff
+Content-Type: application/json
+```
+
+**Request:**
+```json
+{
+  "request_id":  "aria-req-abc123",
+  "route_id":    "api-orders",
+  "primary":  {
+    "status": 200,
+    "headers": { "content-type": "application/json" },
+    "body_b64": "eyJpZCI6MX0=",        // base64-encoded body
+    "latency_ms": 142
+  },
+  "shadow": {
+    "status": 200,
+    "headers": { "content-type": "application/json" },
+    "body_b64": "eyJpZCI6MSwidGV4dCI6Ik5FVyJ9",
+    "latency_ms": 138
+  }
+}
+```
+
+**Response (200):**
+```json
+{
+  "status_match":     true,
+  "body_similarity":  0.85,
+  "latency_delta_ms": -4,
+  "diff_paths":       ["$.text"],
+  "diff_summary":     "1 added field at $.text",
+  "trace_id":         "d9f2a..."
+}
+```
+
+**Errors:** 400 on malformed payload, 503 on internal sidecar overload (Java-side circuit breaker open).
+
+### 2.5.2 Mask NER Detect
+
+```
+POST /v1/mask/detect
+Content-Type: application/json
+```
+
+**Request:**
+```json
+{
+  "request_id": "aria-req-abc123",
+  "route_id":   "api-customers",
+  "text":       "Müşteri Ali Yılmaz, İstanbul'dan arıyor.",
+  "language":   "tr",                   // "auto" allowed
+  "min_confidence": 0.7,                // optional override
+  "already_masked_paths": []
+}
+```
+
+**Response (200):**
+```json
+{
+  "entities": [
+    { "type": "PERSON",   "start": 8,  "end": 19, "score": 0.94, "engine": "djl-huggingface" },
+    { "type": "LOCATION", "start": 21, "end": 29, "score": 0.91, "engine": "djl-huggingface" }
+  ],
+  "engines_used": ["djl-huggingface"],
+  "trace_id":     "d9f2a..."
+}
+```
+
+**Errors:** 400 on malformed payload; 200 with `entities: []` if no engine ready (operator must mount NER models — see `runtime/docs/NER_MODELS.md`).
+
+---
+
+## 2.6 Sidecar Health Endpoints
+
+**Base URL:** `http://127.0.0.1:8081`
+
+| Endpoint | Purpose | Response |
+|---|---|---|
+| `GET /healthz` | Liveness — JVM alive | `200 {"status":"alive"}` |
+| `GET /readyz`  | Readiness — Redis + Postgres reachable | `200 {"status":"ready","ready":true,"dependencies":{"redis":true,"postgres":true}}` or `503` if any dep down or graceful shutdown in progress |
+| `GET /actuator/health`  | Spring Boot composite health | Standard Actuator JSON |
+| `GET /actuator/metrics` | Prometheus metric registry | Standard Actuator JSON |
+| `GET /actuator/info`    | Build version, git commit, license tier | Standard Actuator JSON |
+
+`/healthz` and `/readyz` are the recommended kube probe targets (HLD §3.4 deployment). `/actuator/*` is for in-cluster diagnostics; expose externally only with `management.endpoint.health.show-details: when-authorized` or `never`.
+
+---
+
+## 3. Sidecar — gRPC Service Definitions (forward-compat — no Lua callers in v0.1)
+
+**v0.1 status (per ADR-008).** The Lua plugins use the HTTP bridges in §2.5 as the canonical transport. The gRPC services below remain in the codebase for forward-compat with non-Lua clients (other sidecars, admin tools, internal microservices); they are not on the Lua hot path. Within `ShieldService`, two of the three RPCs are **STUBS** in v0.1 — see notes inline.
 
 ### 3.1 Shield Service
 
@@ -214,13 +324,13 @@ syntax = "proto3";
 package aria.sidecar.v1;
 
 service ShieldService {
-  // Analyze prompt for injection patterns using vector similarity
+  // v0.1 STUB: returns is_injection=false. v0.3 implements vector-similarity (enterprise CISO tier).
   rpc AnalyzePrompt(PromptAnalysisRequest) returns (PromptAnalysisResponse);
-  
-  // Count tokens using exact tiktoken tokenizer
+
+  // v0.1 REAL: implemented by TokenEncoder (jtokkit; cl100k_base fallback per Karar A — LLD §5.3.1).
   rpc CountTokens(TokenCountRequest) returns (TokenCountResponse);
-  
-  // Filter response content for harmful/toxic material
+
+  // v0.1 STUB: returns is_harmful=false. v0.3 implements content moderation (enterprise CISO tier).
   rpc FilterResponse(ContentFilterRequest) returns (ContentFilterResponse);
 }
 
@@ -454,15 +564,35 @@ message HealthCheckResponse {
       },
       "auto_detect": {
         "enabled": true,
-        "patterns": ["pan", "msisdn", "tc_kimlik", "email", "iban"],
+        "patterns": ["pan", "msisdn", "tc_kimlik", "email", "iban", "imei", "ip", "dob"],
         "whitelist_paths": ["$.order_id", "$.transaction_ref"]
       },
       "max_body_size": 10485760,
-      "ner_enabled": false
+      "ner": {
+        "enabled":         true,
+        "fail_mode":       "open",
+        "language":        "auto",
+        "min_confidence":  0.7,
+        "sidecar": {
+          "endpoint":   "http://127.0.0.1:8081",
+          "timeout_ms": 500
+        },
+        "circuit_breaker": {
+          "failure_threshold": 5,
+          "cooldown_seconds":  30,
+          "window_seconds":    60
+        }
+      }
     }
   }
 }
 ```
+
+**NER schema notes (BR-MK-006, LLD §3.4):**
+- `enabled` defaults to `false` for backward-compatibility with v0.1 deployments that do not mount NER model artefacts.
+- `fail_mode: "open"` means: if the sidecar is unreachable or the circuit breaker is open, the Lua plugin falls back to regex-only masking (community default, prioritises availability).
+- `fail_mode: "closed"` redacts all NER candidate fields when the sidecar is down (use for healthcare/finance/defence routes where unmasked PERSON/LOCATION is a regulatory issue). Cannot return 503 from `body_filter` phase — see USER_GUIDE §5.4.1.
+- `language: "auto"` lets the sidecar pick the engine (Turkish-BERT for Turkish text, OpenNLP for English).
 
 ### 4.3 Canary Plugin Configuration
 
@@ -581,5 +711,6 @@ message HealthCheckResponse {
 
 ---
 
-*Document Version: 1.0 | Created: 2026-04-08*
-*Status: Draft — Pending Human Approval*
+*Document Version: 1.1 | Created: 2026-04-08 | Revised: 2026-04-25*
+*Status: v1.1 Draft — Pending Human Approval (after PHASE_REVIEW_2026-04-25)*
+*Change log v1.0 → v1.1: §2.1-2.4 paths corrected to APISIX plugin control-plane convention (`/v1/plugin/aria-canary/{action}/{route_id}`); §2.5 NEW (sidecar HTTP bridges — `/v1/diff`, `/v1/mask/detect` — canonical Lua transport per ADR-008); §2.6 NEW (sidecar health endpoints); §3 reframed as "forward-compat in v0.1" with v0.1 STUB notes on AnalyzePrompt + FilterResponse; §4.2 Mask schema extended with full NER block (BR-MK-006).*

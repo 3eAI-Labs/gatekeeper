@@ -1,7 +1,7 @@
 # ADR-003: gRPC over Unix Domain Sockets for IPC
 
-**Status:** Accepted
-**Date:** 2026-04-08
+**Status:** **Superseded by [ADR-008](ADR-008-http-bridge-over-grpc.md) (2026-04-25) for the Lua↔sidecar transport.** UDS gRPC design intent retained for future non-Lua gRPC callers (admin tools, other sidecars, observability collectors). The "Lua gRPC client library required" portion is invalidated; `aria-grpc.lua` was never written and `lua-resty-grpc` is not a maintained dependency. See ADR-008 Context for the drift narrative.
+**Original Status:** Accepted (2026-04-08)
 **Decision Makers:** AI Architect + PO
 
 ## Context
