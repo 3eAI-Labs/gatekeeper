@@ -1,0 +1,66 @@
+# Sentinel Guidelines Manifest — 3e-Aria-Gatekeeper
+# Migrated 2026-08-24 from docs/GUIDELINES_MANIFEST.yaml (pre-schema format,
+# created 2026-04-25 as Phase 6 FINDING-000 resolution) to MANIFEST_SCHEMA v1.1
+# at the canonical path docs/01_product/.
+# Canonical corpus: ~/Workspaces/sentinel/guidelines/ — the old guidelines_root
+# ~/Workspaces/guidelines/ is frozen legacy (2026-08-23).
+#
+# Positioning: horizontal LLM governance suite for Apache APISIX
+# (open-core: Apache-2.0 Lua plugins + persona-gated enterprise Java sidecar)
+
+system_tier: T2  # governance middleware on the operator's API hot path; business-critical, not life-critical
+
+gate_policy: human  # 2026-04-25 lesson: "AI Reviewer 'pending human final review' was silently treated as approval 2026-04-08 → 2026-04-25; never again"
+
+core:
+  enabled:
+    - CODING_GUIDELINES           # index — pulls _COMMON + per-language (Java sidecar, Go ariactl)
+    - ERROR_HANDLING_GUIDELINE
+    - OBSERVABILITY_GUIDELINE
+    - API_DESIGN_GUIDELINE
+    - DATABASE_GUIDELINE
+    - CONFIG_MANAGEMENT_GUIDELINE
+    - DATA_GOVERNANCE             # pre-schema manifest listed nonexistent DATA_GOVERNANCE_GUIDELINE.md — fixed here
+    - SECURITY_TESTING_GUIDELINE
+    - ARCHITECT_GUIDELINE         # role guidelines below were miscategorized under "domain" in the pre-schema file
+    - HLD_GUIDELINE
+    - LLD_GUIDELINE
+    - DEVOPS_GUIDELINE
+    - DEVELOPER_GUIDELINE
+    - BUSINESS_ANALYST_GUIDELINE
+    - COLLABORATION_GUIDELINE
+    - GLOSSARY
+
+domain:
+  enabled:
+    - AI_AGENT           # positioning: "horizontal LLM governance suite" — LLM traffic decisions at product core
+  disabled:
+    - name: EVENT_DRIVEN
+      reason: "ADR-006 — no Kafka in v1.0 (carried over from pre-schema conditional list)"
+
+stack:
+  # Phase 3 Architect populates per ADRs.
+  # Candidates: APISIX (Lua plugin host), JAVA (aria-runtime sidecar), GO (ariactl, v0.2 deferred).
+  enabled: []
+
+compliance:
+  enabled:
+    - GDPR               # HLD §10.1 — EU data protection
+    - KVKK               # HLD §10.1 — Turkish data protection
+  disabled:
+    - name: PCI_DSS
+      reason: "Gatekeeper does not process payment data; PAN regex is a PII pattern, PCI-DSS scope is the operator's audit responsibility (HLD §10.2 capability-statement reframe; feedback_compliance_framing.md; 2026-04-08 PCI-DSS hallucination lesson)."
+  # PDPL (Saudi/Iraq — VISION §5.4): spec MAY claim it, but no sentinel
+  # compliance/PDPL.md exists yet — enable when the guideline file lands.
+
+# --- Non-schema policies carried over verbatim-in-spirit from the pre-schema manifest ---
+# Drift detection — rerun phase-review after: 5 commits since last freeze, OR 7 days
+#   since last freeze, OR any change to a public-facing claim (VISION, RELEASE_NOTES,
+#   USER_GUIDE compliance text).
+# Spec-code drift — any new shared lib, business rule, or sidecar endpoint MUST land
+#   with HLD §3.x + LLD §11 traceability update in the same commit, or open a tracked
+#   drift item for the next freeze.
+# Approved ≠ complete — phase N approval covers that phase's artefacts only;
+#   re-confirm at every freeze.
+# Capability vs compliance — framework names trigger scope-hygiene framing
+#   (feedback_compliance_framing.md).

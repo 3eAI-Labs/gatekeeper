@@ -44,3 +44,4 @@ htmlcov/
 
 # Generated protobuf
 aria-runtime/src/main/java/com/eai/aria/runtime/proto/
+.sentinel/
